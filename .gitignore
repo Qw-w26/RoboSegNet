@@ -1,0 +1,4 @@
+segmented_videos/
+.claude/
+__pycache__/
+*.png
