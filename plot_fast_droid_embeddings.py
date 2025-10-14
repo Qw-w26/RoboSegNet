@@ -202,16 +202,17 @@ def extract_data_from_h5(h5_path):
         
         return joint_states
 
-def create_windows(trajectory, window_size, stride):
-    """Create sliding windows from a trajectory and convert to Cartesian.
+def create_windows(trajectory, window_size, stride, use_joints=False):
+    """Create sliding windows from a trajectory, optionally convert to Cartesian.
     
     Args:
         trajectory: Joint state trajectory
         window_size: Size of the sliding window
         stride: Stride for the sliding window
+        use_joints: If True, use joint states directly without FK conversion
     
     Returns:
-        List of tuples (window, center_frame_idx) where window is in Cartesian space
+        List of tuples (window, center_frame_idx) where window is either joint or Cartesian space
     """
     windows = []
     n_timesteps = len(trajectory)
@@ -221,8 +222,9 @@ def create_windows(trajectory, window_size, stride):
         end_idx = start_idx + window_size
         window = trajectory[start_idx:end_idx]
         
-        # Convert joint states to Cartesian poses (always)
-        window = ur5_forward_kinematics(window)
+        # Optionally convert joint states to Cartesian poses
+        if not use_joints:
+            window = ur5_forward_kinematics(window)
         
         # Calculate center frame index
         center_frame_idx = start_idx + window_size // 2
@@ -234,8 +236,9 @@ def create_windows(trajectory, window_size, stride):
         start_idx = n_timesteps - window_size
         window = trajectory[-window_size:]
         
-        # Convert joint states to Cartesian poses
-        window = ur5_forward_kinematics(window)
+        # Optionally convert joint states to Cartesian poses
+        if not use_joints:
+            window = ur5_forward_kinematics(window)
         
         # Calculate center frame index
         center_frame_idx = start_idx + window_size // 2
@@ -325,7 +328,7 @@ def create_embeddings_from_windows_with_dino(windows_list, tokenizer, dino_featu
     return np.array(embeddings)
 
 @ray.remote(num_gpus=0.1)
-def process_trajectory(h5_path, window_size, stride):
+def process_trajectory(h5_path, window_size, stride, use_joints=False):
     """Process a single trajectory and return windows with embeddings.
     
     This function is designed to run in parallel using Ray.
@@ -334,6 +337,7 @@ def process_trajectory(h5_path, window_size, stride):
         h5_path: Path to the HDF5 file
         window_size: Size of the sliding window
         stride: Stride for the sliding window
+        use_joints: If True, use joint states directly without FK conversion
     
     Returns:
         Tuple of (windows_with_indices, window_info, video_paths, traj_id)
@@ -464,8 +468,9 @@ def process_trajectory(h5_path, window_size, stride):
         end_idx = start_idx + window_size
         window = trajectory[start_idx:end_idx]
         
-        # Convert joint states to Cartesian poses
-        window = local_ur5_forward_kinematics(window)
+        # Optionally convert joint states to Cartesian poses
+        if not use_joints:
+            window = local_ur5_forward_kinematics(window)
         
         # Calculate center frame index
         center_frame_idx = start_idx + window_size // 2
@@ -486,8 +491,9 @@ def process_trajectory(h5_path, window_size, stride):
         start_idx = n_timesteps - window_size
         window = trajectory[-window_size:]
         
-        # Convert joint states to Cartesian poses
-        window = local_ur5_forward_kinematics(window)
+        # Optionally convert joint states to Cartesian poses
+        if not use_joints:
+            window = local_ur5_forward_kinematics(window)
         
         # Calculate center frame index
         center_frame_idx = start_idx + window_size // 2
@@ -550,13 +556,14 @@ def plot_embeddings(embeddings, window_info, method='pca', window_size=None, str
     plt.tight_layout()
     return fig
 
-def main(window_size=20, stride=10):
+def main(window_size=20, stride=10, use_joints=False):
     """
-    Main function to create embeddings with sliding windows in Cartesian space.
+    Main function to create embeddings with sliding windows.
     
     Args:
         window_size: Size of the sliding window (number of timesteps)
         stride: Stride for the sliding window (overlap = window_size - stride)
+        use_joints: If True, use joint states directly without FK conversion
     """
     # Initialize Ray
     ray.init(ignore_reinit_error=True)
@@ -566,14 +573,15 @@ def main(window_size=20, stride=10):
     
     print(f"Configuration: Window Size = {window_size}, Stride = {stride}")
     print(f"Overlap = {window_size - stride} timesteps")
-    print(f"Using Cartesian space with gripper values and DINOv3 features")
+    space_type = "joint space" if use_joints else "Cartesian space"
+    print(f"Using {space_type} with gripper values and DINOv3 features")
     print()
     
     print("Loading Fast-DROID tokenizer...")
     tokenizer = load_fast_droid_tokenizer()
     
     # Find all HDF5 files
-    h5_files = sorted(glob.glob(f"{dataset_path}/trajectory_*/joints.h5"))[50:]
+    h5_files = sorted(glob.glob(f"{dataset_path}/trajectory_*/joints.h5"))[:50]
     print(f"Found {len(h5_files)} HDF5 files")
     
     # Process trajectories in parallel using Ray
@@ -582,7 +590,7 @@ def main(window_size=20, stride=10):
     # Submit all trajectory processing tasks to Ray
     futures = []
     for h5_path in h5_files:
-        future = process_trajectory.remote(h5_path, window_size, stride)
+        future = process_trajectory.remote(h5_path, window_size, stride, use_joints)
         futures.append(future)
     
     # Wait for all tasks to complete and collect results
@@ -616,19 +624,20 @@ def main(window_size=20, stride=10):
     print("Creating visualizations...")
     
     # PCA plot
+    space_suffix = "joint" if use_joints else "cartesian"
     fig_pca = plot_embeddings(embeddings_normalized, window_info, method='pca', 
                               window_size=window_size, stride=stride)
-    fig_pca.savefig(f'fast_droid_window_embeddings_cartesian_pca_w{window_size}_s{stride}.png', 
+    fig_pca.savefig(f'fast_droid_window_embeddings_{space_suffix}_pca_w{window_size}_s{stride}.png', 
                     dpi=150, bbox_inches='tight')
-    print(f"Saved PCA plot to fast_droid_window_embeddings_cartesian_pca_w{window_size}_s{stride}.png")
+    print(f"Saved PCA plot to fast_droid_window_embeddings_{space_suffix}_pca_w{window_size}_s{stride}.png")
     
     # t-SNE plot (if dataset is not too large)
     if len(embeddings) < 5000:
         fig_tsne = plot_embeddings(embeddings_normalized, window_info, method='tsne',
                                   window_size=window_size, stride=stride)
-        fig_tsne.savefig(f'fast_droid_window_embeddings_cartesian_tsne_w{window_size}_s{stride}.png', 
+        fig_tsne.savefig(f'fast_droid_window_embeddings_{space_suffix}_tsne_w{window_size}_s{stride}.png', 
                         dpi=150, bbox_inches='tight')
-        print(f"Saved t-SNE plot to fast_droid_window_embeddings_cartesian_tsne_w{window_size}_s{stride}.png")
+        print(f"Saved t-SNE plot to fast_droid_window_embeddings_{space_suffix}_tsne_w{window_size}_s{stride}.png")
     
     plt.show()
     
@@ -647,11 +656,13 @@ def main(window_size=20, stride=10):
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description='Create embeddings with sliding windows in Cartesian space')
+    parser = argparse.ArgumentParser(description='Create embeddings with sliding windows')
     parser.add_argument('--window_size', type=int, default=15, 
-                        help='Size of the sliding window (default: 30)')
+                        help='Size of the sliding window (default: 15)')
     parser.add_argument('--stride', type=int, default=1,
-                        help='Stride for the sliding window (default: 15)')
+                        help='Stride for the sliding window (default: 1)')
+    parser.add_argument('--use_joints', action='store_true',
+                        help='Use joint states directly without forward kinematics')
     args = parser.parse_args()
     
-    main(window_size=args.window_size, stride=args.stride)
+    main(window_size=args.window_size, stride=args.stride, use_joints=args.use_joints)
