@@ -215,6 +215,168 @@ class FocalLoss(nn.Module):
             return loss
 
 
+class SoftBCELoss(nn.Module):
+    """
+    Soft Binary Cross-Entropy Loss for smooth probability targets.
+
+    Supports both hard labels (0 or 1) and soft labels (continuous [0, 1]).
+    """
+
+    def __init__(self, pos_weight: float = 1.0, reduction: str = 'mean'):
+        """
+        Initialize Soft BCE Loss.
+
+        Args:
+            pos_weight: Weight for positive class to handle imbalance
+            reduction: 'mean', 'sum', or 'none'
+        """
+        super().__init__()
+        self.pos_weight = pos_weight
+        self.reduction = reduction
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """
+        Compute soft BCE loss.
+
+        Args:
+            logits: (batch_size, 2) - model logits for binary classification
+            targets: (batch_size,) - probability targets in [0, 1]
+
+        Returns:
+            loss: Scalar loss value
+        """
+        # Convert 2-class logits to binary logits (difference)
+        binary_logits = logits[:, 1] - logits[:, 0]
+
+        # Compute BCE with logits for numerical stability
+        # BCE = -[y*log(σ(x)) + (1-y)*log(1-σ(x))]
+        # With pos_weight: BCE = -[y*pos_weight*log(σ(x)) + (1-y)*log(1-σ(x))]
+
+        max_val = torch.clamp(binary_logits, min=0)
+        if self.pos_weight != 1.0:
+            loss = (1 - targets) * binary_logits + \
+                   (1 + (self.pos_weight - 1) * targets) * \
+                   (torch.log(torch.exp(-max_val) + torch.exp(binary_logits - max_val)) + max_val)
+        else:
+            loss = (1 - targets) * binary_logits + max_val + \
+                   torch.log(torch.exp(-max_val) + torch.exp(-binary_logits - max_val))
+
+        if self.reduction == 'mean':
+            return loss.mean()
+        elif self.reduction == 'sum':
+            return loss.sum()
+        else:
+            return loss
+
+
+class SoftFocalLoss(nn.Module):
+    """
+    Focal Loss adapted for soft probability targets.
+
+    Combines the benefits of focal loss (handling class imbalance and hard examples)
+    with support for smooth probability labels.
+    """
+
+    def __init__(self, alpha: float = 0.25, gamma: float = 2.0, reduction: str = 'mean'):
+        """
+        Initialize Soft Focal Loss.
+
+        Args:
+            alpha: Weighting factor for positive class
+            gamma: Focusing parameter (higher = more focus on hard examples)
+            reduction: 'mean', 'sum', or 'none'
+        """
+        super().__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.reduction = reduction
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """
+        Compute soft focal loss.
+
+        Args:
+            logits: (batch_size, 2) - model logits
+            targets: (batch_size,) - soft probability targets in [0, 1]
+
+        Returns:
+            loss: Scalar loss value
+        """
+        # Get predicted probabilities
+        probs = F.softmax(logits, dim=1)
+
+        # Probability of positive class (boundary)
+        p_pos = probs[:, 1]
+        p_neg = probs[:, 0]
+
+        # Compute weighted cross-entropy with soft targets
+        # CE = -[y*log(p_pos) + (1-y)*log(p_neg)]
+        ce_pos = -torch.log(p_pos + 1e-8) * targets
+        ce_neg = -torch.log(p_neg + 1e-8) * (1 - targets)
+        ce_loss = ce_pos + ce_neg
+
+        # Compute focal weight
+        # For soft targets, we weight by how "wrong" the prediction is
+        # pt represents how much the prediction agrees with the target
+        pt = targets * p_pos + (1 - targets) * p_neg
+        focal_weight = (1 - pt) ** self.gamma
+
+        # Apply alpha weighting (more weight to positive class)
+        alpha_weight = targets * self.alpha + (1 - targets) * (1 - self.alpha)
+
+        loss = alpha_weight * focal_weight * ce_loss
+
+        if self.reduction == 'mean':
+            return loss.mean()
+        elif self.reduction == 'sum':
+            return loss.sum()
+        else:
+            return loss
+
+
+class MSEProbabilityLoss(nn.Module):
+    """
+    Mean Squared Error loss for probability prediction.
+
+    Simple loss that treats boundary prediction as regression.
+    """
+
+    def __init__(self, reduction: str = 'mean'):
+        """
+        Initialize MSE Probability Loss.
+
+        Args:
+            reduction: 'mean', 'sum', or 'none'
+        """
+        super().__init__()
+        self.reduction = reduction
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """
+        Compute MSE loss on predicted probabilities.
+
+        Args:
+            logits: (batch_size, 2) - model logits
+            targets: (batch_size,) - probability targets in [0, 1]
+
+        Returns:
+            loss: Scalar loss value
+        """
+        # Get predicted probability for positive class
+        probs = F.softmax(logits, dim=1)
+        pred_prob = probs[:, 1]
+
+        # MSE between predicted and target probability
+        loss = (pred_prob - targets) ** 2
+
+        if self.reduction == 'mean':
+            return loss.mean()
+        elif self.reduction == 'sum':
+            return loss.sum()
+        else:
+            return loss
+
+
 class WeightedBCELoss(nn.Module):
     """
     Weighted Binary Cross-Entropy Loss for handling class imbalance.

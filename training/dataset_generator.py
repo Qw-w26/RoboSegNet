@@ -18,6 +18,7 @@ import ray
 from data import BaseSegmentationDataset, TrajectoryData
 from embedding.fast_droid_embeddings import FastDROIDEmbedder
 from benchmark.metrics import detect_boundaries
+from .label_smoothing import LabelSmoother, create_smoother
 
 
 @ray.remote(num_gpus=0.3)
@@ -160,7 +161,8 @@ class SegmentBoundaryDataset(torch.utils.data.Dataset):
         device: str = 'cuda' if torch.cuda.is_available() else 'cpu',
         precompute_features: bool = True,
         num_ray_workers: int = 4,
-        use_ray: bool = True
+        use_ray: bool = True,
+        label_smoother: Optional[LabelSmoother] = None
     ):
         """
         Initialize boundary prediction dataset.
@@ -176,6 +178,7 @@ class SegmentBoundaryDataset(torch.utils.data.Dataset):
             precompute_features: If True, pre-compute and cache all DINO features
             num_ray_workers: Number of Ray actors for parallel DINO extraction
             use_ray: If True, use Ray for parallel processing
+            label_smoother: Optional label smoother for creating soft labels (default: Gaussian with sigma=2)
         """
         self.dataset = dataset
         self.window_size = window_size
@@ -187,6 +190,12 @@ class SegmentBoundaryDataset(torch.utils.data.Dataset):
         self.precompute_features = precompute_features
         self.num_ray_workers = num_ray_workers
         self.use_ray = use_ray
+
+        # Use Gaussian smoother by default if not specified
+        if label_smoother is None:
+            self.label_smoother = create_smoother('gaussian', sigma=2.0, peak_value=1.0)
+        else:
+            self.label_smoother = label_smoother
 
         # Initialize embedder
         self.embedder = FastDROIDEmbedder(
@@ -231,7 +240,7 @@ class SegmentBoundaryDataset(torch.utils.data.Dataset):
 
     def _process_trajectory(self, traj: TrajectoryData) -> List[Dict[str, Any]]:
         """
-        Process a single trajectory and generate samples.
+        Process a single trajectory and generate samples with smoothed labels.
 
         Args:
             traj: Trajectory data
@@ -261,15 +270,15 @@ class SegmentBoundaryDataset(torch.utils.data.Dataset):
 
         # Detect ground truth boundaries
         gt_boundaries = detect_boundaries(segment_labels)
-        gt_boundaries_set = set(gt_boundaries)
 
-        # Expand boundaries with tolerance
-        boundary_frames = set()
+        # Create binary labels for the entire trajectory
+        binary_labels = np.zeros(len(segment_labels))
         for b in gt_boundaries:
-            for offset in range(-self.boundary_tolerance, self.boundary_tolerance + 1):
-                frame_idx = b + offset
-                if 0 <= frame_idx < len(segment_labels):
-                    boundary_frames.add(frame_idx)
+            if 0 <= b < len(segment_labels):
+                binary_labels[b] = 1
+
+        # Apply label smoothing to get smooth probability labels
+        smoothed_labels = self.label_smoother.smooth(binary_labels, gt_boundaries)
 
         # Get video path (prefer head camera)
         video_path = None
@@ -288,8 +297,8 @@ class SegmentBoundaryDataset(torch.utils.data.Dataset):
             if center_frame_idx >= len(segment_labels):
                 continue
 
-            # Determine label
-            label = 1 if center_frame_idx in boundary_frames else 0
+            # Get smoothed probability label for this frame
+            label = float(smoothed_labels[center_frame_idx])
 
             # Compute frame indices for DINO extraction
             start_idx = center_frame_idx - self.window_size // 2
@@ -304,7 +313,7 @@ class SegmentBoundaryDataset(torch.utils.data.Dataset):
                 'window': window,  # (window_size, 14)
                 'video_path': str(video_path) if video_path else None,
                 'frame_indices': (begin_frame, middle_frame, end_frame),
-                'label': label,
+                'label': label,  # Now a float probability [0, 1]
                 'proprio_path': str(proprio_path)
             }
 
@@ -374,7 +383,7 @@ class SegmentBoundaryDataset(torch.utils.data.Dataset):
             'tokenized_actions': torch.tensor(token_embedding, dtype=torch.long),
             'proprio_stats': torch.tensor(proprio_stats, dtype=torch.float32),
             'dino_features': torch.tensor(dino_features, dtype=torch.float32),
-            'label': torch.tensor(sample['label'], dtype=torch.long),
+            'label': torch.tensor(sample['label'], dtype=torch.float32),  # Float for smooth probabilities
             'center_frame_idx': sample['center_frame_idx'],
             'trajectory_id': sample['trajectory_id']
         }
@@ -482,7 +491,7 @@ class SegmentBoundaryDataset(torch.utils.data.Dataset):
             ray.kill(actor)
 
     def save_to_disk(self, save_path: Path):
-        """Save preprocessed dataset to disk including cached features."""
+        """Save preprocessed dataset to disk including cached features and smoother config."""
         print(f"Saving dataset to {save_path}...")
 
         data = {
@@ -492,7 +501,8 @@ class SegmentBoundaryDataset(torch.utils.data.Dataset):
                 'window_size': self.window_size,
                 'stride': self.stride,
                 'max_token_length': self.max_token_length,
-                'boundary_tolerance': self.boundary_tolerance
+                'boundary_tolerance': self.boundary_tolerance,
+                'label_smoother_config': self.label_smoother.get_config()
             }
         }
 
@@ -528,6 +538,15 @@ class SegmentBoundaryDataset(torch.utils.data.Dataset):
         instance.precompute_features = True
         instance.num_ray_workers = num_ray_workers
         instance.use_ray = use_ray
+
+        # Restore label smoother from config (or use default)
+        smoother_config = data['config'].get('label_smoother_config')
+        if smoother_config:
+            smoother_type = smoother_config.pop('type')
+            instance.label_smoother = create_smoother(smoother_type, **smoother_config)
+        else:
+            # Fallback for old cached datasets without smoother config
+            instance.label_smoother = create_smoother('gaussian', sigma=2.0, peak_value=1.0)
 
         # Initialize embedder
         instance.embedder = FastDROIDEmbedder(
