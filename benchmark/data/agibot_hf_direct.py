@@ -137,6 +137,21 @@ class AgiBotHFDirectDataset(BaseSegmentationDataset):
         # List all TAR files in the observations directory
         if self.download_videos:
             try:
+                # Check if videos are already extracted for our episodes
+                extract_task_dir = self.extract_dir / str(task_id)
+                videos_already_extracted = 0
+                if extract_task_dir.exists():
+                    for episode_id in episode_ids:
+                        episode_dir = extract_task_dir / str(episode_id)
+                        if episode_dir.exists() and (episode_dir / "videos").exists():
+                            videos_already_extracted += 1
+                            # Index already extracted videos
+                            self._index_extracted_files(extract_task_dir, task_id)
+
+                if videos_already_extracted == len(episode_ids):
+                    print(f"All {videos_already_extracted} video directories already extracted")
+                    return
+
                 all_files = list_repo_files(
                     repo_id=self.repo_id,
                     repo_type='dataset'
@@ -164,7 +179,6 @@ class AgiBotHFDirectDataset(BaseSegmentationDataset):
                         )
 
                         # Extract TAR file
-                        extract_task_dir = self.extract_dir / str(task_id)
                         extract_task_dir.mkdir(parents=True, exist_ok=True)
 
                         with tarfile.open(tar_path, 'r') as tar:

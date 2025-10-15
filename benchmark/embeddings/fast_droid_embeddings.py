@@ -4,7 +4,7 @@ Fast-DROID + DINOv3 embedding module for trajectory representation.
 This module provides embedding functionality using:
 - Fast-DROID tokenizer for action sequences
 - DINOv3 for visual features (when videos available)
-- Forward kinematics for Cartesian space conversion (when robot model available)
+- End effector poses directly from H5 files
 """
 
 import numpy as np
@@ -23,21 +23,13 @@ except ImportError:
     CV2_AVAILABLE = False
     print("Warning: cv2 not available. Video features will be disabled.")
 
-try:
-    import yourdfpy
-    URDF_AVAILABLE = True
-except ImportError:
-    URDF_AVAILABLE = False
-    print("Warning: yourdfpy not available. Forward kinematics will be disabled.")
-
 
 class FastDROIDEmbedder:
     """
     Embedding generator using Fast-DROID tokenizer and DINOv3 features.
 
     This class handles:
-    - Loading proprioceptive data from H5 files
-    - Converting joint space to Cartesian space (optional)
+    - Loading end effector poses from H5 files
     - Creating sliding windows
     - Tokenizing action sequences with Fast-DROID
     - Extracting visual features with DINOv3 (optional)
@@ -48,9 +40,8 @@ class FastDROIDEmbedder:
         self,
         window_size: int = 15,
         stride: int = 1,
-        use_cartesian: bool = True,
         use_dino: bool = True,
-        urdf_path: Optional[str] = None,
+        max_token_length: Optional[int] = None,
         device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
     ):
         """
@@ -59,17 +50,15 @@ class FastDROIDEmbedder:
         Args:
             window_size: Size of sliding window
             stride: Stride for sliding window
-            use_cartesian: If True, convert joint space to Cartesian space
             use_dino: If True, extract DINOv3 visual features
-            urdf_path: Path to URDF file for forward kinematics
+            max_token_length: Fixed maximum token length (for consistent embeddings)
             device: Device to use for DINOv3 model
         """
         self.window_size = window_size
         self.stride = stride
-        self.use_cartesian = use_cartesian
         self.use_dino = use_dino
-        self.urdf_path = urdf_path
         self.device = device
+        self.max_token_length = max_token_length  # Fixed max token length
 
         # Initialize tokenizer
         self.tokenizer = self._load_tokenizer()
@@ -79,11 +68,6 @@ class FastDROIDEmbedder:
         self.dino_processor = None
         if use_dino and CV2_AVAILABLE:
             self._init_dino_model()
-
-        # Initialize robot model if needed
-        self.robot_model = None
-        if use_cartesian and URDF_AVAILABLE and urdf_path:
-            self._init_robot_model(urdf_path)
 
     def _load_tokenizer(self):
         """Load Fast-DROID tokenizer."""
@@ -110,125 +94,55 @@ class FastDROIDEmbedder:
             print(f"Warning: Failed to load DINOv3 model: {e}")
             self.use_dino = False
 
-    def _init_robot_model(self, urdf_path: str):
-        """Initialize robot model from URDF."""
-        try:
-            self.robot_model = yourdfpy.URDF.load(urdf_path)
-            print(f"Loaded robot model from {urdf_path}")
-        except Exception as e:
-            print(f"Warning: Failed to load robot model: {e}")
-            self.use_cartesian = False
-
     def load_proprioception(self, h5_path: Path) -> Optional[np.ndarray]:
-        """Load proprioceptive data from H5 file."""
+        """
+        Load end effector poses from H5 file.
+
+        Returns:
+            Array of shape (N, 14) containing:
+            - Left end effector: position (3) + orientation (4) = 7 values
+            - Right end effector: position (3) + orientation (4) = 7 values
+        """
         if not h5_path.exists():
             return None
 
         try:
             with h5py.File(h5_path, 'r') as f:
-                # Try AgiBotWorld format first
-                if 'state' in f and 'joint' in f['state'] and 'position' in f['state/joint']:
-                    return np.array(f['state/joint/position'])
-                # Try simple format
-                elif 'joint_states' in f:
-                    return np.array(f['joint_states'])
-                # Try action format
-                elif 'action' in f and 'joint' in f['action'] and 'position' in f['action/joint']:
-                    return np.array(f['action/joint/position'])
+                # Load end effector poses from AgiBotWorld format
+                # /state/end/position: [N, 2, 3] - left [:, 0, :], right [:, 1, :], xyz in meters
+                # /state/end/orientation: [N, 2, 4] - left [:, 0, :], right [:, 1, :], quaternion xyzw
+                if 'state' in f and 'end' in f['state']:
+                    position = np.array(f['state/end/position'])  # Shape: (N, 2, 3)
+                    orientation = np.array(f['state/end/orientation'])  # Shape: (N, 2, 4)
+
+                    # Flatten to (N, 14): [left_pos(3), left_ori(4), right_pos(3), right_ori(4)]
+                    n_timesteps = position.shape[0]
+                    ee_poses = np.zeros((n_timesteps, 14))
+                    ee_poses[:, 0:3] = position[:, 0, :]  # Left position
+                    ee_poses[:, 3:7] = orientation[:, 0, :]  # Left orientation
+                    ee_poses[:, 7:10] = position[:, 1, :]  # Right position
+                    ee_poses[:, 10:14] = orientation[:, 1, :]  # Right orientation
+
+                    return ee_poses
                 else:
-                    # Fallback: try first key
-                    keys = list(f.keys())
-                    if keys:
-                        data = f[keys[0]]
-                        if hasattr(data, 'shape'):
-                            return np.array(data)
-            return None
+                    raise ValueError("H5 file does not contain end effector pose data at 'state/end'")
+
         except Exception as e:
             print(f"Warning: Failed to load {h5_path}: {e}")
             return None
-
-    def forward_kinematics(self, joint_angles: np.ndarray) -> np.ndarray:
-        """
-        Convert joint angles to Cartesian poses using forward kinematics.
-
-        Args:
-            joint_angles: (n_timesteps, n_joints) array
-
-        Returns:
-            (n_timesteps, 7) array with [x, y, z, roll, pitch, yaw, gripper]
-        """
-        if not self.use_cartesian or self.robot_model is None:
-            return joint_angles
-
-        n_timesteps = joint_angles.shape[0]
-        gripper_values = joint_angles[:, -1] / 255.0 if joint_angles.shape[1] >= 7 else np.zeros(n_timesteps)
-        cartesian_poses = np.zeros((n_timesteps, 7))
-
-        joint_names = [joint.name for joint in self.robot_model.joint_map.values()
-                      if joint.type in ['revolute', 'continuous']]
-        n_joints_to_use = min(6, joint_angles.shape[1], len(joint_names))
-
-        for t in range(n_timesteps):
-            try:
-                cfg = {joint_names[i]: float(joint_angles[t, i])
-                      for i in range(n_joints_to_use)}
-                self.robot_model.update_cfg(cfg)
-
-                # Try common end-effector link names
-                ee_link_names = ['tool0', 'ee_link', 'wrist_3_link', 'robotiq_85_base_link']
-                ee_matrix = None
-
-                for ee_name in ee_link_names:
-                    if ee_name in self.robot_model.link_map:
-                        ee_matrix = self.robot_model.get_transform(ee_name, 'base_link')
-                        break
-
-                if ee_matrix is None:
-                    link_names = list(self.robot_model.link_map.keys())
-                    ee_matrix = self.robot_model.get_transform(link_names[-1], 'base_link')
-
-                # Extract position
-                cartesian_poses[t, 0:3] = ee_matrix[0:3, 3]
-
-                # Extract orientation (Euler angles)
-                R = ee_matrix[0:3, 0:3]
-                sy = np.sqrt(R[0, 0]**2 + R[1, 0]**2)
-
-                if sy >= 1e-6:
-                    roll = np.arctan2(R[2, 1], R[2, 2])
-                    pitch = np.arctan2(-R[2, 0], sy)
-                    yaw = np.arctan2(R[1, 0], R[0, 0])
-                else:
-                    roll = np.arctan2(-R[1, 2], R[1, 1])
-                    pitch = np.arctan2(-R[2, 0], sy)
-                    yaw = 0
-
-                cartesian_poses[t, 3] = roll
-                cartesian_poses[t, 4] = pitch
-                cartesian_poses[t, 5] = yaw
-                cartesian_poses[t, 6] = gripper_values[t]
-
-            except:
-                continue
-
-        return cartesian_poses
 
     def create_windows(self, trajectory: np.ndarray) -> List[Tuple[np.ndarray, int]]:
         """
         Create sliding windows from trajectory.
 
         Args:
-            trajectory: Trajectory data (n_timesteps, n_features)
+            trajectory: Trajectory data (n_timesteps, 14)  - end effector poses
 
         Returns:
             List of (window, center_frame_idx) tuples
         """
         windows = []
         n_timesteps = len(trajectory)
-
-        # Convert to Cartesian if needed
-        if self.use_cartesian:
-            trajectory = self.forward_kinematics(trajectory)
 
         # Create windows
         for start_idx in range(0, n_timesteps - self.window_size + 1, self.stride):
@@ -412,9 +326,7 @@ def load_fast_droid_tokenizer():
 def create_embedding_function(
     window_size: int = 15,
     stride: int = 1,
-    use_cartesian: bool = True,
-    use_dino: bool = True,
-    urdf_path: Optional[str] = None
+    use_dino: bool = True
 ):
     """
     Create an embedding function for use with the benchmark.
@@ -422,9 +334,7 @@ def create_embedding_function(
     Args:
         window_size: Size of sliding window
         stride: Stride for sliding window
-        use_cartesian: If True, use Cartesian space
         use_dino: If True, extract visual features
-        urdf_path: Path to URDF file
 
     Returns:
         Function that takes TrajectoryData and returns embeddings
@@ -432,9 +342,7 @@ def create_embedding_function(
     embedder = FastDROIDEmbedder(
         window_size=window_size,
         stride=stride,
-        use_cartesian=use_cartesian,
-        use_dino=use_dino,
-        urdf_path=urdf_path
+        use_dino=use_dino
     )
 
     def embedding_fn(trajectory_data):
@@ -445,8 +353,8 @@ def create_embedding_function(
         video_paths = getattr(trajectory_data, 'video_paths', None)
         video_path = None
         if video_paths:
-            # Try to get wrist camera first
-            video_path = video_paths.get('wrist') or video_paths.get('exo') or list(video_paths.values())[0]
+            # Try to get head camera or wrist camera first
+            video_path = video_paths.get('head_color') or video_paths.get('hand_left_color') or list(video_paths.values())[0]
 
         return embedder.embed_trajectory(trajectory_data, h5_path, video_path)
 

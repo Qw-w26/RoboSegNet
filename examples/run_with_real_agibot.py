@@ -4,9 +4,10 @@ Run benchmark with real AgiBotWorld trajectories and Fast-DROID embeddings.
 This is the main example showing how to use Fast-DROID + DINOv3 embeddings
 with the task segmentation benchmark framework.
 
+Uses end effector poses directly from H5 files (no forward kinematics needed).
+
 Requirements:
 - pip install transformers torch h5py opencv-python Pillow
-- (Optional) yourdfpy for forward kinematics
 """
 
 import sys
@@ -31,9 +32,9 @@ def main():
     print("="*70)
     print("\nThis example demonstrates:")
     print("1. Loading real AgiBotWorld trajectories with ground truth")
-    print("2. Using Fast-DROID tokenizer for action embeddings")
-    print("3. (Optional) DINOv3 visual features if videos available")
-    print("4. (Optional) Forward kinematics if robot model available")
+    print("2. Using end effector poses directly from H5 files")
+    print("3. Using Fast-DROID tokenizer for action embeddings")
+    print("4. (Optional) DINOv3 visual features if videos available")
     print("5. Benchmarking multiple segmentation methods")
     print("="*70 + "\n")
 
@@ -77,19 +78,19 @@ def main():
             n_clusters=6,  # Typical number of segments
             temporal_weight=0.3,
             window_size=15,
-            stride=1
+            stride=15
         ),
         ChangePointDetectionMethod(
             penalty=3.0,
             min_size=5,
             max_segments=10,
             window_size=15,
-            stride=1
+            stride=15
         ),
         GMMMethod(
             n_components=6,
             window_size=15,
-            stride=1
+            stride=15
         )
     ]
 
@@ -100,28 +101,14 @@ def main():
     print("Step 3: Initializing Fast-DROID + DINOv3 embedder...")
     print("="*70)
 
-    # Check for optional components
-    urdf_path = "/home/kushtimusprime/ur5_policy_training/urdf/ur5_with_robotiq_gripper.urdf"
-    has_urdf = Path(urdf_path).exists()
-
-    if has_urdf:
-        print(f"✓ Found URDF model: {urdf_path}")
-        print("  → Forward kinematics will be used (Cartesian space)")
-    else:
-        print(f"✗ URDF not found at {urdf_path}")
-        print("  → Will use joint space directly")
-        urdf_path = None
-
-    print("\nDownloading proprioceptive and video data...")
+    print("\nUsing end effector poses directly from H5 files")
     print("Creating Fast-DROID + DINOv3 embeddings from real data...\n")
 
     # Create embedding function with full pipeline
     embedding_fn = create_embedding_function(
         window_size=15,
         stride=1,
-        use_cartesian=has_urdf,
-        use_dino=True,  # Use DINOv3 visual features
-        urdf_path=urdf_path
+        use_dino=True  # Use DINOv3 visual features
     )
 
     # Create benchmark runner
@@ -161,9 +148,7 @@ def main():
     print("   from benchmark import create_embedding_function")
     print("   embedding_fn = create_embedding_function(")
     print("       window_size=20,")
-    print("       use_cartesian=True,")
-    print("       use_dino=True,")
-    print("       urdf_path='/path/to/robot.urdf'")
+    print("       use_dino=True")
     print("   )")
     print("\n3. Add your own segmentation methods:")
     print("   - Inherit from WindowBasedSegmentationMethod")
@@ -198,7 +183,6 @@ if __name__ == "__main__":
         print("   - Check internet connection")
         print("   - Dataset may require authentication")
         print("\n3. For local datasets:")
-        print("   - Ensure H5 files contain 'joint_states' or similar")
+        print("   - Ensure H5 files contain 'state/end/position' and 'state/end/orientation'")
         print("   - Videos should be MP4 format")
-        print("   - URDF file path should be valid")
         print("="*70)
