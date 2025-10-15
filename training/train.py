@@ -433,8 +433,7 @@ def main():
         optimizer,
         mode='max',
         factor=0.5,
-        patience=5,
-        verbose=True
+        patience=5
     )
 
     # Create trainer

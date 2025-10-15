@@ -5,3 +5,6 @@ __pycache__/
 agibot_full_data/
 test_tar_cache/
 fastdroid_results/
+training_output/
+training_log.txt/
+agibot_cache/

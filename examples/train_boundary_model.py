@@ -10,24 +10,24 @@ This script demonstrates how to:
 from pathlib import Path
 import torch
 
-from data import AgiBotWorldDataset
+from data import AgiBotHFDirectDataset
 from training import SegmentBoundaryDataset, create_dataloaders, Trainer
 from model import create_model, FocalLoss
 
 
 def main():
     # Configuration
-    data_root = Path("/home/syx/ucsf/task_seg/agibot_full_data/extracted")
+    cache_dir = Path("/home/syx/ucsf/task_seg/agibot_full_data")
     task_ids = [327]
-    max_trajectories = 50  # Use more for better training
+    max_trajectories = 10  # Start with fewer for testing
 
     window_size = 15
     stride = 1
     max_token_length = 600
     boundary_tolerance = 2
 
-    batch_size = 32
-    num_epochs = 30
+    batch_size = 8  # Smaller batch size for testing
+    num_epochs = 2  # Just 2 epochs for initial testing
     learning_rate = 1e-3
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -38,11 +38,13 @@ def main():
     print("="*70)
 
     # Step 1: Load dataset
-    print(f"\nStep 1: Loading AgiBotWorld dataset...")
-    dataset = AgiBotWorldDataset(
-        data_root=data_root,
+    print(f"\nStep 1: Loading AgiBotWorld dataset from HuggingFace...")
+    dataset = AgiBotHFDirectDataset(
         task_ids=task_ids,
-        max_trajectories=max_trajectories
+        max_trajectories=max_trajectories,
+        cache_dir=str(cache_dir),
+        download_videos=True,  # Need videos for DINO
+        download_proprio=True  # Need H5 for proprio
     )
     dataset.print_statistics()
 
@@ -112,8 +114,7 @@ def main():
         optimizer,
         mode='max',
         factor=0.5,
-        patience=5,
-        verbose=True
+        patience=5
     )
     print("  Scheduler: ReduceLROnPlateau")
 
