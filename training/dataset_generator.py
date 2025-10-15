@@ -21,7 +21,7 @@ from benchmark.metrics import detect_boundaries
 from .label_smoothing import LabelSmoother, create_smoother
 
 
-@ray.remote(num_gpus=0.3)
+@ray.remote(num_gpus=1)
 class DinoFeatureExtractor:
     """
     Ray actor for extracting DINO features in parallel.

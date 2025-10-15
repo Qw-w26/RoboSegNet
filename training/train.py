@@ -141,10 +141,13 @@ class Trainer:
         all_preds = np.array(all_preds)
         all_labels = np.array(all_labels)
 
+        # Convert soft labels to hard binary labels (threshold at 0.5)
+        all_labels_binary = (all_labels >= 0.5).astype(int)
+
         precision, recall, f1, _ = precision_recall_fscore_support(
-            all_labels, all_preds, average='binary', zero_division=0
+            all_labels_binary, all_preds, average='binary', zero_division=0
         )
-        accuracy = (all_preds == all_labels).mean()
+        accuracy = (all_preds == all_labels_binary).mean()
 
         metrics = {
             'loss': avg_loss,
@@ -194,19 +197,22 @@ class Trainer:
         all_labels = np.array(all_labels)
         all_probs = np.array(all_probs)
 
-        precision, recall, f1, _ = precision_recall_fscore_support(
-            all_labels, all_preds, average='binary', zero_division=0
-        )
-        accuracy = (all_preds == all_labels).mean()
+        # Convert soft labels to hard binary labels (threshold at 0.5)
+        all_labels_binary = (all_labels >= 0.5).astype(int)
 
-        # ROC AUC
+        precision, recall, f1, _ = precision_recall_fscore_support(
+            all_labels_binary, all_preds, average='binary', zero_division=0
+        )
+        accuracy = (all_preds == all_labels_binary).mean()
+
+        # ROC AUC (can use soft labels since it works with probabilities)
         try:
-            roc_auc = roc_auc_score(all_labels, all_probs)
+            roc_auc = roc_auc_score(all_labels_binary, all_probs)
         except:
             roc_auc = 0.0
 
         # Confusion matrix
-        cm = confusion_matrix(all_labels, all_preds)
+        cm = confusion_matrix(all_labels_binary, all_preds)
 
         metrics = {
             'loss': avg_loss,
@@ -284,10 +290,13 @@ class Trainer:
             plt.close(fig)
 
             # 4. Log prediction info
-            viz_data[f'predictions/sample_{i}_label'] = labels[sample_idx].item()
+            label_value = labels[sample_idx].item()
+            label_binary = int(label_value >= 0.5)  # Convert soft label to binary
+            viz_data[f'predictions/sample_{i}_label'] = label_value  # Log soft label value
+            viz_data[f'predictions/sample_{i}_label_binary'] = label_binary  # Log binary label
             viz_data[f'predictions/sample_{i}_pred'] = preds[sample_idx].item()
             viz_data[f'predictions/sample_{i}_prob'] = probs[sample_idx].item()
-            viz_data[f'predictions/sample_{i}_correct'] = (preds[sample_idx] == labels[sample_idx]).item()
+            viz_data[f'predictions/sample_{i}_correct'] = (preds[sample_idx].item() == label_binary)
 
         # Log all visualizations
         wandb.log(viz_data, step=self.global_step)

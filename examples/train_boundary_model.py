@@ -23,7 +23,7 @@ from training import SegmentBoundaryDataset, create_dataloaders, Trainer, create
 from model import create_model, SoftFocalLoss, detect_boundaries as detect_boundaries_nms
 
 
-@ray.remote(num_gpus=0.5)
+@ray.remote(num_gpus=1)
 class InferenceDinoExtractor:
     """Ray actor for extracting DINO features during inference."""
 
@@ -368,7 +368,10 @@ def create_visualization_video(result, output_path, window_size, boundary_tolera
 
     try:
         output_container = av.open(str(output_path), mode='w')
-        output_stream = output_container.add_stream('h264', rate=fps)
+        # Convert fps to integer or Fraction for PyAV
+        from fractions import Fraction
+        fps_fraction = Fraction(fps).limit_denominator(1000)
+        output_stream = output_container.add_stream('h264', rate=fps_fraction)
         output_stream.width = width
         output_stream.height = height
         output_stream.pix_fmt = 'yuv420p'
@@ -512,10 +515,10 @@ def main():
     # Configuration
     cache_dir = Path("/home/syx/ucsf/task_seg/agibot_full_data")
     task_ids = [327]
-    max_trajectories = 5  # Start with fewer for testing
+    max_trajectories = 50  # Start with fewer for testing
 
-    window_size = 15
-    stride = 1
+    window_size = 100
+    stride = 100
     max_token_length = 600
     boundary_tolerance = 2
 
@@ -535,7 +538,7 @@ def main():
 
     batch_size = 8  # Smaller batch size for testing
     num_epochs = 2  # Just 2 epochs for initial testing
-    learning_rate = 1e-3
+    learning_rate = 1e-4
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     output_dir = Path("./training_output")
