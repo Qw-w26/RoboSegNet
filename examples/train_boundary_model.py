@@ -517,8 +517,8 @@ def main():
     task_ids = [327]
     max_trajectories = 50  # Start with fewer for testing
 
-    window_size = 100
-    stride = 100
+    window_size = 30
+    stride = 30
     max_token_length = 600
     boundary_tolerance = 2
 

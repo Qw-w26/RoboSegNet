@@ -145,8 +145,6 @@ class AgiBotHFDirectDataset(BaseSegmentationDataset):
                         episode_dir = extract_task_dir / str(episode_id)
                         if episode_dir.exists() and (episode_dir / "videos").exists():
                             videos_already_extracted += 1
-                            # Index already extracted videos
-                            self._index_extracted_files(extract_task_dir, task_id)
 
                 if videos_already_extracted == len(episode_ids):
                     print(f"All {videos_already_extracted} video directories already extracted")
@@ -186,11 +184,11 @@ class AgiBotHFDirectDataset(BaseSegmentationDataset):
                         with tarfile.open(tar_path, 'r') as tar:
                             tar.extractall(path=extract_task_dir)
 
-                        # Index extracted files by episode ID
-                        self._index_extracted_files(extract_task_dir, task_id)
-
                     except Exception as e:
                         print(f"Warning: Failed to extract {tar_filename}: {e}")
+
+                # Index all extracted files once after all TARs are processed
+                self._index_extracted_files(extract_task_dir, task_id)
 
             except Exception as e:
                 print(f"Warning: Failed to list TAR files for task {task_id}: {e}")

@@ -231,12 +231,40 @@ class SegmentBoundaryDataset(torch.utils.data.Dataset):
 
         print(f"Generated {len(self.samples)} samples")
 
-        # Print class distribution
-        n_positive = sum(1 for s in self.samples if s['label'] == 1)
-        n_negative = len(self.samples) - n_positive
-        print(f"Positive samples (boundaries): {n_positive}")
-        print(f"Negative samples (non-boundaries): {n_negative}")
-        print(f"Ratio: {n_positive / len(self.samples):.3f}")
+        # Check if stride might be causing sparse boundary sampling
+        smoother_config = self.label_smoother.get_config()
+        if smoother_config['type'] == 'gaussian':
+            effective_range = int(3 * smoother_config['sigma'])  # 3-sigma covers ~99.7%
+        elif smoother_config['type'] == 'triangular':
+            effective_range = smoother_config['width']
+        else:
+            effective_range = self.boundary_tolerance
+
+        if self.stride > effective_range:
+            print(f"\n⚠️  WARNING: stride ({self.stride}) > effective smoothing range (~{effective_range} frames)")
+            print(f"   Many boundaries may be missed or have low probability samples.")
+            print(f"   For better coverage, consider: stride <= {max(effective_range, 10)}")
+
+        # Print label distribution (with smoothing, labels are continuous probabilities)
+        labels = np.array([s['label'] for s in self.samples])
+
+        # Count samples above different thresholds for reference
+        n_high_conf = sum(1 for l in labels if l > 0.8)  # High confidence boundaries
+        n_medium_conf = sum(1 for l in labels if 0.5 < l <= 0.8)  # Medium confidence
+        n_low_conf = sum(1 for l in labels if 0.2 < l <= 0.5)  # Low confidence
+        n_negative = sum(1 for l in labels if l <= 0.2)  # Non-boundaries
+
+        print(f"\nLabel Distribution (with {self.label_smoother.get_config()['type']} smoothing):")
+        print(f"  High confidence boundaries (>0.8): {n_high_conf} ({n_high_conf/len(self.samples)*100:.1f}%)")
+        print(f"  Medium confidence (0.5-0.8): {n_medium_conf} ({n_medium_conf/len(self.samples)*100:.1f}%)")
+        print(f"  Low confidence (0.2-0.5): {n_low_conf} ({n_low_conf/len(self.samples)*100:.1f}%)")
+        print(f"  Non-boundaries (≤0.2): {n_negative} ({n_negative/len(self.samples)*100:.1f}%)")
+        print(f"\nLabel statistics:")
+        print(f"  Mean: {labels.mean():.4f}")
+        print(f"  Std: {labels.std():.4f}")
+        print(f"  Min: {labels.min():.4f}")
+        print(f"  Max: {labels.max():.4f}")
+        print(f"  Median: {np.median(labels):.4f}")
 
     def _process_trajectory(self, traj: TrajectoryData) -> List[Dict[str, Any]]:
         """
