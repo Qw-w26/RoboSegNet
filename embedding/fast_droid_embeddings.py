@@ -160,38 +160,71 @@ class FastDROIDEmbedder:
         return windows
 
     def extract_dino_features(self, video_path: Path, frame_idx: int) -> Optional[np.ndarray]:
-        """Extract DINOv3 features from a video frame."""
+        """Extract DINOv3 features from a video frame using PyAV for AV1 support."""
         if not self.use_dino or not CV2_AVAILABLE or self.dino_model is None:
-            return None
+            raise RuntimeError("DINO feature extraction is not available")
 
         if not video_path.exists():
-            return None
+            raise FileNotFoundError(f"Video file not found: {video_path}")
 
         try:
-            cap = cv2.VideoCapture(str(video_path))
-            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-            ret, frame = cap.read()
-            cap.release()
+            import av
+        except ImportError:
+            raise ImportError("PyAV is required for video reading. Install with: pip install av")
 
-            if not ret:
-                return None
+        try:
+            # Open video with PyAV (supports AV1 codec)
+            container = av.open(str(video_path))
+            stream = container.streams.video[0]
 
-            # Convert BGR to RGB
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            image = Image.fromarray(frame)
+            # Check frame index
+            if stream.frames > 0 and frame_idx >= stream.frames:
+                container.close()
+                raise ValueError(f"Frame index {frame_idx} out of range (video has {stream.frames} frames)")
 
-            # Process image
-            inputs = self.dino_processor(images=image, return_tensors="pt")
-            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+            # Seek to approximate position first for efficiency
+            if frame_idx > 0:
+                # Calculate timestamp for seeking
+                time_base = float(stream.time_base)
+                avg_frame_rate = float(stream.average_rate)
+                if avg_frame_rate > 0:
+                    timestamp = int(frame_idx / avg_frame_rate / time_base)
+                    container.seek(timestamp, stream=stream)
 
-            with torch.no_grad():
-                outputs = self.dino_model(**inputs)
-                features = outputs.last_hidden_state[:, 0, :]
+            # Decode frames until we reach the target
+            current_idx = 0
+            for packet in container.demux(stream):
+                for frame in packet.decode():
+                    if current_idx == frame_idx:
+                        # Convert frame to numpy array (RGB format)
+                        img = frame.to_ndarray(format='rgb24')
+                        container.close()
 
-            return features.cpu().numpy().flatten()
+                        # Convert to PIL Image
+                        image = Image.fromarray(img)
+
+                        # Process image with DINO
+                        inputs = self.dino_processor(images=image, return_tensors="pt")
+                        inputs = {k: v.to(self.device) for k, v in inputs.items()}
+
+                        with torch.no_grad():
+                            outputs = self.dino_model(**inputs)
+                            features = outputs.last_hidden_state[:, 0, :]
+
+                        return features.cpu().numpy().flatten()
+
+                    current_idx += 1
+                    if current_idx > frame_idx:
+                        break
+
+            # If we get here, frame wasn't found
+            container.close()
+            raise RuntimeError(f"Failed to read frame {frame_idx} from video: {video_path}")
+
         except Exception as e:
-            print(f"Warning: Failed to extract DINO features: {e}")
-            return None
+            if 'container' in locals():
+                container.close()
+            raise RuntimeError(f"Error reading video {video_path} frame {frame_idx}: {str(e)}") from e
 
     def create_embeddings(
         self,

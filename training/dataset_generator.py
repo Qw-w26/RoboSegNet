@@ -33,12 +33,13 @@ class SegmentBoundaryDataset(torch.utils.data.Dataset):
     def __init__(
         self,
         dataset: BaseSegmentationDataset,
-        window_size: int = 15,
-        stride: int = 1,
+        window_size: int = 30,
+        stride: int = 30,
         max_token_length: int = 600,
         boundary_tolerance: int = 2,
         cache_dir: Optional[Path] = None,
-        device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
+        device: str = 'cuda' if torch.cuda.is_available() else 'cpu',
+        precompute_features: bool = True
     ):
         """
         Initialize boundary prediction dataset.
@@ -51,6 +52,7 @@ class SegmentBoundaryDataset(torch.utils.data.Dataset):
             boundary_tolerance: Tolerance for labeling frames near boundaries as positive
             cache_dir: Directory to cache extracted features
             device: Device for DINO model
+            precompute_features: If True, pre-compute and cache all DINO features
         """
         self.dataset = dataset
         self.window_size = window_size
@@ -59,6 +61,7 @@ class SegmentBoundaryDataset(torch.utils.data.Dataset):
         self.boundary_tolerance = boundary_tolerance
         self.cache_dir = Path(cache_dir) if cache_dir else None
         self.device = device
+        self.precompute_features = precompute_features
 
         # Initialize embedder
         self.embedder = FastDROIDEmbedder(
@@ -69,12 +72,18 @@ class SegmentBoundaryDataset(torch.utils.data.Dataset):
             device=device
         )
 
-        # Storage for samples
+        # Storage for samples and cached features
         self.samples = []
+        self.cached_dino_features = {}  # Dict: sample_idx -> dino_features
 
         # Generate samples
         print("Generating training samples...")
         self._generate_samples()
+
+        # Pre-compute DINO features if requested
+        if self.precompute_features:
+            print("Pre-computing DINO features for all samples...")
+            self._precompute_dino_features()
 
     def _generate_samples(self):
         """Generate all training samples from the dataset."""
@@ -223,11 +232,14 @@ class SegmentBoundaryDataset(torch.utils.data.Dataset):
             np.percentile(window, 75, axis=0)
         ])
 
-        # Extract DINO features
-        dino_features = self._extract_dino_features(
-            sample['video_path'],
-            sample['frame_indices']
-        )
+        # Get DINO features (from cache if available, otherwise extract)
+        if idx in self.cached_dino_features:
+            dino_features = self.cached_dino_features[idx]
+        else:
+            dino_features = self._extract_dino_features(
+                sample['video_path'],
+                sample['frame_indices']
+            )
 
         return {
             'tokenized_actions': torch.tensor(token_embedding, dtype=torch.long),
@@ -269,12 +281,26 @@ class SegmentBoundaryDataset(torch.utils.data.Dataset):
 
         return np.concatenate(features)
 
+    def _precompute_dino_features(self):
+        """Pre-compute DINO features for all samples to speed up training."""
+        print(f"Pre-computing DINO features for {len(self.samples)} samples...")
+
+        for idx, sample in enumerate(tqdm(self.samples, desc="Extracting DINO features")):
+            dino_features = self._extract_dino_features(
+                sample['video_path'],
+                sample['frame_indices']
+            )
+            self.cached_dino_features[idx] = dino_features
+
+        print(f"Pre-computed DINO features for {len(self.cached_dino_features)} samples")
+
     def save_to_disk(self, save_path: Path):
-        """Save preprocessed dataset to disk."""
+        """Save preprocessed dataset to disk including cached features."""
         print(f"Saving dataset to {save_path}...")
 
         data = {
             'samples': self.samples,
+            'cached_dino_features': self.cached_dino_features,
             'config': {
                 'window_size': self.window_size,
                 'stride': self.stride,
@@ -283,29 +309,47 @@ class SegmentBoundaryDataset(torch.utils.data.Dataset):
             }
         }
 
+        save_path.parent.mkdir(parents=True, exist_ok=True)
         with open(save_path, 'wb') as f:
             pickle.dump(data, f)
 
-        print(f"Dataset saved to {save_path}")
+        cache_size_mb = save_path.stat().st_size / (1024 * 1024)
+        print(f"Dataset saved to {save_path} ({cache_size_mb:.2f} MB)")
 
     @classmethod
-    def load_from_disk(cls, load_path: Path, embedder: FastDROIDEmbedder) -> 'SegmentBoundaryDataset':
+    def load_from_disk(cls, load_path: Path, dataset: BaseSegmentationDataset, device: str = 'cuda') -> 'SegmentBoundaryDataset':
         """Load preprocessed dataset from disk."""
-        print(f"Loading dataset from {load_path}...")
+        print(f"Loading cached dataset from {load_path}...")
+
+        if not load_path.exists():
+            raise FileNotFoundError(f"Cache file not found: {load_path}")
 
         with open(load_path, 'rb') as f:
             data = pickle.load(f)
 
         # Create instance without regenerating samples
         instance = cls.__new__(cls)
+        instance.dataset = dataset
         instance.samples = data['samples']
-        instance.embedder = embedder
+        instance.cached_dino_features = data.get('cached_dino_features', {})
         instance.window_size = data['config']['window_size']
         instance.stride = data['config']['stride']
         instance.max_token_length = data['config']['max_token_length']
         instance.boundary_tolerance = data['config']['boundary_tolerance']
+        instance.device = device
+        instance.precompute_features = True
 
-        print(f"Loaded {len(instance.samples)} samples from {load_path}")
+        # Initialize embedder
+        instance.embedder = FastDROIDEmbedder(
+            window_size=instance.window_size,
+            stride=instance.stride,
+            use_dino=True,
+            max_token_length=instance.max_token_length,
+            device=device
+        )
+
+        cache_size_mb = load_path.stat().st_size / (1024 * 1024)
+        print(f"Loaded {len(instance.samples)} samples with {len(instance.cached_dino_features)} cached DINO features ({cache_size_mb:.2f} MB)")
 
         return instance
 

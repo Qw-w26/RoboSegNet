@@ -150,6 +150,8 @@ class AgiBotHFDirectDataset(BaseSegmentationDataset):
 
                 if videos_already_extracted == len(episode_ids):
                     print(f"All {videos_already_extracted} video directories already extracted")
+                    # Make sure to index them
+                    self._index_extracted_files(extract_task_dir, task_id)
                     return
 
                 all_files = list_repo_files(
@@ -306,14 +308,35 @@ class AgiBotHFDirectDataset(BaseSegmentationDataset):
 
     def _index_extracted_files(self, extract_dir: Path, task_id: int):
         """Index extracted files by episode ID."""
+        indexed_videos = 0
+        indexed_h5 = 0
+
         # Find all files in extracted directory
         for file_path in extract_dir.rglob('*'):
             if file_path.is_file():
-                # Extract episode ID from filename
-                # Files are typically named like: 648642_head_color.mp4, 648642.h5, etc.
-                filename = file_path.stem.split('_')[0]  # Get episode ID part
+                # Try to extract episode ID from path
+                # Structure could be: {episode_id}/videos/{filename}.mp4
+                # Or: {episode_id}_head_color.mp4
                 try:
-                    episode_id = int(filename)
+                    # Check if file is in a nested structure like episode_id/videos/
+                    parts = file_path.relative_to(extract_dir).parts
+                    episode_id = None
+
+                    # Try to get episode_id from directory structure
+                    if len(parts) >= 2:
+                        # First part should be episode_id (e.g., 648649/videos/head_color.mp4)
+                        try:
+                            episode_id = int(parts[0])  # First part is episode_id
+                        except ValueError:
+                            pass
+
+                    # Fallback: try to extract from filename
+                    if episode_id is None:
+                        filename = file_path.stem.split('_')[0]
+                        episode_id = int(filename)
+
+                    if episode_id is None:
+                        continue
 
                     if episode_id not in self.episode_data_cache:
                         self.episode_data_cache[episode_id] = {
@@ -324,14 +347,28 @@ class AgiBotHFDirectDataset(BaseSegmentationDataset):
                     # Categorize file
                     if file_path.suffix == '.h5':
                         self.episode_data_cache[episode_id]['h5'] = file_path
+                        indexed_h5 += 1
                     elif file_path.suffix == '.mp4':
                         # Determine video type from filename
-                        video_type = '_'.join(file_path.stem.split('_')[1:])  # e.g., "head_color"
-                        self.episode_data_cache[episode_id]['videos'][video_type] = file_path
+                        # Could be just "head_color.mp4" or "648649_head_color.mp4"
+                        stem_parts = file_path.stem.split('_')
+                        # Remove episode_id if it's in the filename
+                        try:
+                            int(stem_parts[0])
+                            video_type = '_'.join(stem_parts[1:])  # e.g., "head_color"
+                        except ValueError:
+                            video_type = file_path.stem  # Use full stem if no episode_id prefix
 
-                except (ValueError, IndexError):
+                        if video_type:
+                            self.episode_data_cache[episode_id]['videos'][video_type] = file_path
+                            indexed_videos += 1
+
+                except (ValueError, IndexError, TypeError) as e:
                     # Not a valid episode file
                     pass
+
+        if indexed_videos > 0 or indexed_h5 > 0:
+            print(f"Indexed {indexed_videos} videos and {indexed_h5} H5 files for {len(self.episode_data_cache)} episodes")
 
     def _get_h5_file(self, episode_id: int) -> Optional[Path]:
         """Get proprioceptive H5 file for an episode from cache."""

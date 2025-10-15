@@ -15,6 +15,9 @@ from tqdm import tqdm
 import numpy as np
 from typing import Dict, Optional, Tuple
 from sklearn.metrics import precision_recall_fscore_support, confusion_matrix, roc_auc_score
+import wandb
+import cv2
+import matplotlib.pyplot as plt
 
 from data import AgiBotWorldDataset
 from training.dataset_generator import SegmentBoundaryDataset, create_dataloaders
@@ -34,7 +37,10 @@ class Trainer:
         scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None,
         device: str = 'cuda' if torch.cuda.is_available() else 'cpu',
         output_dir: Path = Path('./checkpoints'),
-        log_dir: Path = Path('./logs')
+        log_dir: Path = Path('./logs'),
+        use_wandb: bool = True,
+        log_visualizations: bool = True,
+        viz_frequency: int = 100
     ):
         """
         Initialize trainer.
@@ -49,6 +55,9 @@ class Trainer:
             device: Device to train on
             output_dir: Directory to save checkpoints
             log_dir: Directory to save logs
+            use_wandb: Whether to use Weights & Biases for logging
+            log_visualizations: Whether to log visualizations (inputs, outputs, videos)
+            viz_frequency: Log visualizations every N steps
         """
         self.model = model.to(device)
         self.train_loader = train_loader
@@ -66,6 +75,11 @@ class Trainer:
 
         # Tensorboard writer
         self.writer = SummaryWriter(log_dir=str(self.log_dir))
+
+        # Wandb settings
+        self.use_wandb = use_wandb
+        self.log_visualizations = log_visualizations
+        self.viz_frequency = viz_frequency
 
         # Training state
         self.current_epoch = 0
@@ -108,6 +122,18 @@ class Trainer:
 
             # Log to tensorboard
             self.writer.add_scalar('train/loss_step', loss.item(), self.global_step)
+
+            # Log to wandb
+            if self.use_wandb:
+                wandb.log({
+                    'train/loss_step': loss.item(),
+                    'train/step': self.global_step
+                }, step=self.global_step)
+
+                # Log visualizations periodically
+                if self.log_visualizations and self.global_step % self.viz_frequency == 0:
+                    self._log_visualizations(batch, logits, labels)
+
             self.global_step += 1
 
         # Compute metrics
@@ -194,6 +220,155 @@ class Trainer:
 
         return metrics
 
+    def _log_visualizations(self, batch: Dict[str, torch.Tensor], logits: torch.Tensor, labels: torch.Tensor):
+        """
+        Log visualizations to wandb including inputs, outputs, DINO features, and videos.
+
+        Args:
+            batch: Batch of data from dataloader
+            logits: Model predictions (logits)
+            labels: Ground truth labels
+        """
+        if not self.use_wandb:
+            return
+
+        # Get predictions and probabilities
+        probs = torch.softmax(logits, dim=1)[:, 1]  # Probability of boundary class
+        preds = torch.argmax(logits, dim=1)
+
+        # Select a few samples to visualize (max 4)
+        num_samples = min(4, len(labels))
+
+        viz_data = {}
+
+        for i in range(num_samples):
+            sample_idx = i
+
+            # 1. Log DINO features as heatmap
+            dino_feat = batch['dino_features'][sample_idx].cpu().numpy()  # Shape: (3072,) = 3 frames * 1024
+            dino_feat_reshaped = dino_feat.reshape(3, 1024)  # 3 frames, 1024 features each
+
+            # Visualize DINO features as image
+            fig, ax = plt.subplots(figsize=(10, 3))
+            im = ax.imshow(dino_feat_reshaped, aspect='auto', cmap='viridis')
+            ax.set_xlabel('Feature Dimension')
+            ax.set_ylabel('Frame (begin/middle/end)')
+            ax.set_yticks([0, 1, 2])
+            ax.set_yticklabels(['Begin', 'Middle', 'End'])
+            plt.colorbar(im, ax=ax)
+            plt.title(f'DINO Features - Sample {i}')
+            plt.tight_layout()
+            viz_data[f'dino_features/sample_{i}'] = wandb.Image(fig)
+            plt.close(fig)
+
+            # 2. Log proprio stats as histogram
+            proprio_stats = batch['proprio_stats'][sample_idx].cpu().numpy()
+            fig, ax = plt.subplots(figsize=(10, 4))
+            ax.bar(range(len(proprio_stats)), proprio_stats)
+            ax.set_xlabel('Proprio Stat Index')
+            ax.set_ylabel('Value')
+            ax.set_title(f'Proprioception Statistics - Sample {i}')
+            plt.tight_layout()
+            viz_data[f'proprio_stats/sample_{i}'] = wandb.Image(fig)
+            plt.close(fig)
+
+            # 3. Log tokenized actions (first 50 tokens)
+            tokens = batch['tokenized_actions'][sample_idx].cpu().numpy()[:50]
+            fig, ax = plt.subplots(figsize=(12, 3))
+            ax.bar(range(len(tokens)), tokens)
+            ax.set_xlabel('Token Position')
+            ax.set_ylabel('Token ID')
+            ax.set_title(f'Tokenized Actions (first 50) - Sample {i}')
+            plt.tight_layout()
+            viz_data[f'tokenized_actions/sample_{i}'] = wandb.Image(fig)
+            plt.close(fig)
+
+            # 4. Log prediction info
+            viz_data[f'predictions/sample_{i}_label'] = labels[sample_idx].item()
+            viz_data[f'predictions/sample_{i}_pred'] = preds[sample_idx].item()
+            viz_data[f'predictions/sample_{i}_prob'] = probs[sample_idx].item()
+            viz_data[f'predictions/sample_{i}_correct'] = (preds[sample_idx] == labels[sample_idx]).item()
+
+        # Log all visualizations
+        wandb.log(viz_data, step=self.global_step)
+
+    def _render_predictions_on_video(
+        self,
+        video_path: str,
+        frame_indices: list,
+        predictions: list,
+        labels: list,
+        probabilities: list,
+        output_path: str = None
+    ):
+        """
+        Render predictions on video frames.
+
+        Args:
+            video_path: Path to video file
+            frame_indices: List of frame indices to render
+            predictions: List of predicted labels (0 or 1)
+            labels: List of ground truth labels
+            probabilities: List of prediction probabilities
+            output_path: Path to save rendered video
+
+        Returns:
+            Path to rendered video or None if failed
+        """
+        if not Path(video_path).exists():
+            return None
+
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            return None
+
+        fps = int(cap.get(cv2.CAP_PROP_FPS))
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+        # Create output video writer
+        if output_path is None:
+            output_path = f'/tmp/viz_video_{self.global_step}.mp4'
+
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+
+        frame_idx = 0
+        pred_dict = {frame_indices[i]: (predictions[i], labels[i], probabilities[i])
+                     for i in range(len(frame_indices))}
+
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            # If this frame has a prediction, annotate it
+            if frame_idx in pred_dict:
+                pred, label, prob = pred_dict[frame_idx]
+
+                # Color: green if correct, red if incorrect
+                color = (0, 255, 0) if pred == label else (0, 0, 255)
+
+                # Draw prediction info
+                text = f'Pred: {"Boundary" if pred else "Non-boundary"} ({prob:.2f})'
+                cv2.putText(frame, text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX,
+                           0.7, color, 2)
+
+                text2 = f'True: {"Boundary" if label else "Non-boundary"}'
+                cv2.putText(frame, text2, (10, 60), cv2.FONT_HERSHEY_SIMPLEX,
+                           0.7, (255, 255, 255), 2)
+
+                # Draw circle to indicate this frame
+                cv2.circle(frame, (width - 30, 30), 20, color, -1)
+
+            out.write(frame)
+            frame_idx += 1
+
+        cap.release()
+        out.release()
+
+        return output_path
+
     def train(self, num_epochs: int, save_every: int = 5):
         """
         Train the model.
@@ -221,6 +396,16 @@ class Trainer:
             self.writer.add_scalar('train/recall', train_metrics['recall'], epoch)
             self.writer.add_scalar('train/f1', train_metrics['f1'], epoch)
 
+            if self.use_wandb:
+                wandb.log({
+                    'train/epoch_loss': train_metrics['loss'],
+                    'train/epoch_accuracy': train_metrics['accuracy'],
+                    'train/epoch_precision': train_metrics['precision'],
+                    'train/epoch_recall': train_metrics['recall'],
+                    'train/epoch_f1': train_metrics['f1'],
+                    'epoch': epoch
+                }, step=self.global_step)
+
             print(f"\nEpoch {epoch} Train Metrics:")
             print(f"  Loss: {train_metrics['loss']:.4f}")
             print(f"  Accuracy: {train_metrics['accuracy']:.4f}")
@@ -239,6 +424,25 @@ class Trainer:
                 self.writer.add_scalar('val/recall', val_metrics['recall'], epoch)
                 self.writer.add_scalar('val/f1', val_metrics['f1'], epoch)
                 self.writer.add_scalar('val/roc_auc', val_metrics['roc_auc'], epoch)
+
+                if self.use_wandb:
+                    # Log confusion matrix as wandb table
+                    cm = np.array(val_metrics['confusion_matrix'])
+                    wandb.log({
+                        'val/epoch_loss': val_metrics['loss'],
+                        'val/epoch_accuracy': val_metrics['accuracy'],
+                        'val/epoch_precision': val_metrics['precision'],
+                        'val/epoch_recall': val_metrics['recall'],
+                        'val/epoch_f1': val_metrics['f1'],
+                        'val/epoch_roc_auc': val_metrics['roc_auc'],
+                        'val/confusion_matrix': wandb.plot.confusion_matrix(
+                            probs=None,
+                            y_true=None,
+                            preds=None,
+                            class_names=['non-boundary', 'boundary']
+                        ) if cm.size > 0 else None,
+                        'epoch': epoch
+                    }, step=self.global_step)
 
                 print(f"\nEpoch {epoch} Val Metrics:")
                 print(f"  Loss: {val_metrics['loss']:.4f}")
@@ -263,6 +467,8 @@ class Trainer:
 
                 current_lr = self.optimizer.param_groups[0]['lr']
                 self.writer.add_scalar('train/learning_rate', current_lr, epoch)
+                if self.use_wandb:
+                    wandb.log({'train/learning_rate': current_lr}, step=self.global_step)
                 print(f"  Learning rate: {current_lr:.6f}")
 
             # Save checkpoint

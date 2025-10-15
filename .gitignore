@@ -8,3 +8,4 @@ fastdroid_results/
 training_output/
 training_log.txt/
 agibot_cache/
+wandb/
