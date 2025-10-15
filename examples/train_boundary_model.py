@@ -406,7 +406,9 @@ def main():
             max_token_length=max_token_length,
             boundary_tolerance=boundary_tolerance,
             device=device,
-            precompute_features=True  # Pre-compute DINO features
+            precompute_features=True,  # Pre-compute DINO features
+            use_ray=True,  # Enable Ray parallelization
+            num_ray_workers=4  # Use 4 parallel workers for DINO extraction
         )
         # Save for next time
         print(f"\nSaving dataset cache to {dataset_cache_path}...")
