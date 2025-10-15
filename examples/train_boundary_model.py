@@ -321,7 +321,8 @@ def predict_trajectory(model, dataset, traj_idx, window_size, stride, max_token_
         'probabilities': probabilities,
         'gt_boundaries': gt_boundaries,
         'segment_labels': segment_labels,
-        'total_frames': len(segment_labels)
+        'total_frames': len(segment_labels),
+        'segments': traj.segments  # Pass segment annotations for displaying action text
     }
 
 
@@ -343,6 +344,10 @@ def create_visualization_video(result, output_path, window_size, boundary_tolera
     probabilities = result['probabilities']
     gt_boundaries = result['gt_boundaries']
     segment_labels = result['segment_labels']
+    segments = result.get('segments', [])
+
+    # Create segment ID to action text mapping
+    segment_text_map = {seg.segment_id: seg.action_text for seg in segments}
 
     print(f"\nCreating visualization video...")
     print(f"  Input video: {video_path}")
@@ -407,7 +412,8 @@ def create_visualization_video(result, output_path, window_size, boundary_tolera
             # Get current segment and GT  probability
             if frame_idx < len(segment_labels):
                 current_segment = segment_labels[frame_idx]
-                is_gt_boundary = frame_idx in gt_boundaries_set
+                # Use gt_boundary_frames (with tolerance) instead of gt_boundaries_set (exact only)
+                is_gt_boundary = frame_idx in gt_boundary_frames
                 gt_prob = 1.0 if is_gt_boundary else 0.0
             else:
                 current_segment = -1
@@ -422,10 +428,16 @@ def create_visualization_video(result, output_path, window_size, boundary_tolera
             # Draw segment info
             y_offset = 30
 
-            # Current segment number
-            text = f"Segment: #{current_segment}"
+            # Current segment number and action text
+            segment_action = segment_text_map.get(current_segment, "Unknown action")
+            # Truncate long text to fit on screen
+            max_text_len = 60
+            if len(segment_action) > max_text_len:
+                segment_action = segment_action[:max_text_len-3] + "..."
+
+            text = f"Segment #{current_segment}: {segment_action}"
             cv2.putText(frame, text, (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX,
-                       0.7, (255, 255, 255), 2)
+                       0.6, (255, 255, 255), 2)
             y_offset += 35
 
             # Ground truth probability
@@ -515,7 +527,7 @@ def main():
     # Configuration
     cache_dir = Path("/home/syx/ucsf/task_seg/agibot_full_data")
     task_ids = [327]
-    max_trajectories = 50  # Start with fewer for testing
+    max_trajectories = 10  # Start with fewer for testing
 
     window_size = 30
     stride = 30
@@ -524,7 +536,7 @@ def main():
 
     # Label smoothing configuration
     smoother_type = 'gaussian'  # Options: 'gaussian', 'triangular', 'uniform', 'exponential', 'none'
-    smoother_sigma = 2.0  # For Gaussian smoothing
+    smoother_sigma = 15.0  # For Gaussian smoothing
 
     # Post-processing configuration
     nms_method = 'nms'  # Options: 'nms', 'threshold', 'adaptive', 'topk'
@@ -537,7 +549,7 @@ def main():
     inference_batch_size = 64  # Larger batch for faster inference
 
     batch_size = 8  # Smaller batch size for testing
-    num_epochs = 2  # Just 2 epochs for initial testing
+    num_epochs = 20  # Just 2 epochs for initial testing
     learning_rate = 1e-4
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
