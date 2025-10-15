@@ -14,9 +14,9 @@ from tqdm import tqdm
 from dataclasses import asdict
 import time
 
-from .data import BaseSegmentationDataset, TrajectoryData
-from .methods import BaseSegmentationMethod
-from .metrics import SegmentationMetrics, evaluate_segmentation, aggregate_metrics
+from data import BaseSegmentationDataset, TrajectoryData
+from benchmark.methods import BaseSegmentationMethod
+from benchmark.metrics import SegmentationMetrics, evaluate_segmentation, aggregate_metrics
 
 
 class BenchmarkRunner:
@@ -310,8 +310,8 @@ class BenchmarkRunner:
 
 if __name__ == "__main__":
     # Example usage
-    from .data import AgiBotWorldDataset
-    from .methods import (
+    from data import AgiBotWorldDataset
+    from benchmark.methods import (
         SpectralClusteringMethod,
         ChangePointDetectionMethod,
         GMMMethod,

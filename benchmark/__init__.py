@@ -4,14 +4,14 @@ Task Segmentation Benchmark Framework
 A modular framework for benchmarking task segmentation methods on robotics datasets.
 """
 
-from .data import (
+from data import (
     BaseSegmentationDataset,
     TrajectoryData,
     SegmentAnnotation,
     AgiBotWorldDataset,
     AgiBotHFDirectDataset
 )
-from .methods import (
+from benchmark.methods import (
     BaseSegmentationMethod,
     WindowBasedSegmentationMethod,
     SpectralClusteringMethod,
@@ -20,13 +20,13 @@ from .methods import (
     HierarchicalClusteringMethod,
     KMeansMethod
 )
-from .metrics import (
+from benchmark.metrics import (
     SegmentationMetrics,
     evaluate_segmentation,
     aggregate_metrics
 )
-from .benchmark_runner import BenchmarkRunner
-from .embeddings import (
+from benchmark.benchmark_runner import BenchmarkRunner
+from embedding import (
     FastDROIDEmbedder,
     load_fast_droid_tokenizer,
     create_embedding_function

@@ -210,7 +210,12 @@ class FastDROIDEmbedder:
         """
         embeddings = []
         all_tokens = []
-        max_token_length = 0
+
+        # Use fixed max_token_length if provided, otherwise compute it
+        if self.max_token_length is not None:
+            max_token_length = self.max_token_length
+        else:
+            max_token_length = 0
 
         # First pass: tokenize all windows
         for window, _ in tqdm(windows, desc="Tokenizing windows", leave=False):
@@ -223,7 +228,10 @@ class FastDROIDEmbedder:
                 tokens = self.tokenizer(action_str, truncation=False, return_tensors='np')
                 token_ids = tokens['input_ids'].flatten()
                 all_tokens.append(token_ids)
-                max_token_length = max(max_token_length, len(token_ids))
+
+                # Only compute max if not using fixed length
+                if self.max_token_length is None:
+                    max_token_length = max(max_token_length, len(token_ids))
             else:
                 all_tokens.append(np.array([]))
 
@@ -326,7 +334,8 @@ def load_fast_droid_tokenizer():
 def create_embedding_function(
     window_size: int = 15,
     stride: int = 1,
-    use_dino: bool = True
+    use_dino: bool = True,
+    max_token_length: int = 600
 ):
     """
     Create an embedding function for use with the benchmark.
@@ -335,6 +344,7 @@ def create_embedding_function(
         window_size: Size of sliding window
         stride: Stride for sliding window
         use_dino: If True, extract visual features
+        max_token_length: Fixed maximum token length for consistent embeddings
 
     Returns:
         Function that takes TrajectoryData and returns embeddings
@@ -342,7 +352,8 @@ def create_embedding_function(
     embedder = FastDROIDEmbedder(
         window_size=window_size,
         stride=stride,
-        use_dino=use_dino
+        use_dino=use_dino,
+        max_token_length=max_token_length
     )
 
     def embedding_fn(trajectory_data):
