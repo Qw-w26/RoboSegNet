@@ -581,7 +581,7 @@ def main(window_size=20, stride=10, use_joints=False):
     tokenizer = load_fast_droid_tokenizer()
     
     # Find all HDF5 files
-    h5_files = sorted(glob.glob(f"{dataset_path}/trajectory_*/joints.h5"))[:1]
+    h5_files = sorted(glob.glob(f"{dataset_path}/trajectory_*/joints.h5"))[32]
     print(f"Found {len(h5_files)} HDF5 files")
     
     # Process trajectories in parallel using Ray
