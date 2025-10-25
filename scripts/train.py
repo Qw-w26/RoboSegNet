@@ -97,6 +97,13 @@ def parse_args() -> argparse.Namespace:
         help='Cache directory for features'
     )
 
+    parser.add_argument(
+        '--fps',
+        type=float,
+        default=5.0,
+        help='Target FPS for data (should match preprocessing target_fps)'
+    )
+
     # Model
     parser.add_argument(
         '--vocab-size',
@@ -272,6 +279,7 @@ def create_datasets(
         window_size=180,
         stride=10,
         vocab_size=args.vocab_size,
+        fps=args.fps,
         num_workers=args.num_workers,
         device=str(device),
         ray_worker_device=str(device),

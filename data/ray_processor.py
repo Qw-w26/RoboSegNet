@@ -127,6 +127,7 @@ class TrajectoryProcessor:
                 'image_paths': image_paths,  # List of relative path strings or None
                 'video_paths': trajectory_data.get('video_paths', {}),
                 'total_frames': trajectory_data.get('total_frames', 0),
+                'fps': self.target_fps,  # Store actual target fps used for subsampling
                 'metadata': trajectory_data.get('metadata', {})
             }
 
@@ -149,8 +150,31 @@ class TrajectoryProcessor:
 
         return labels
 
+    def _compute_frequency(self, timestamps: np.ndarray) -> float:
+        """Compute sampling frequency from timestamps."""
+        if timestamps is None or len(timestamps) < 2:
+            return 30.0  # Default to 30 Hz if no timestamps
+        
+        # Calculate time differences and use median to be robust to outliers
+        dt = np.diff(timestamps)
+        median_dt = np.median(dt)
+        
+        if median_dt <= 0:
+            return 30.0  # Fallback to default
+        
+        frequency = 1.0 / median_dt
+        return float(frequency)
+
     def _extract_proprioception(self, proprio_path: Path) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
-        """Extract proprioception data from H5 file."""
+        """Extract and subsample proprioception data from H5 file to match target_fps.
+        
+        This ensures that proprioception data is aligned with visual data (images/DINO features)
+        which are extracted at target_fps. The actual proprioception frequency is computed from
+        timestamps, and the data is subsampled accordingly.
+        
+        Returns:
+            Tuple of (subsampled_proprio_data, subsampled_timestamps)
+        """
         if not proprio_path.exists():
             return None, None
 
@@ -166,6 +190,34 @@ class TrajectoryProcessor:
                     timestamps = f['timestamp'][:]
                 elif 'timestamps' in f:
                     timestamps = f['timestamps'][:]
+
+                # Return None if no data
+                if proprio_data is None:
+                    return None, None
+
+                # Subsample to match target_fps
+                if timestamps is not None and len(timestamps) == len(proprio_data):
+                    # Compute actual frequency
+                    actual_freq = self._compute_frequency(timestamps)
+                    sample_rate = max(1, int(actual_freq / self.target_fps))
+                    
+                    # Subsample data and timestamps
+                    indices = np.arange(0, len(proprio_data), sample_rate)
+                    proprio_data = proprio_data[indices]
+                    timestamps = timestamps[indices]
+                    
+                    # Debug info (optional)
+                    # print(f"Proprioception: {actual_freq:.1f} Hz -> {self.target_fps} Hz (sample_rate={sample_rate})")
+                else:
+                    # If no timestamps or mismatch, assume 30 Hz and subsample
+                    assumed_freq = 30.0
+                    sample_rate = max(1, int(assumed_freq / self.target_fps))
+                    indices = np.arange(0, len(proprio_data), sample_rate)
+                    proprio_data = proprio_data[indices]
+                    if timestamps is not None:
+                        # Try to subsample timestamps too if available
+                        if len(timestamps) >= len(indices):
+                            timestamps = timestamps[indices]
 
                 return proprio_data, timestamps
         except Exception as e:
@@ -299,6 +351,7 @@ def process_trajectory_batch(
                 'image_paths': None,
                 'video_paths': traj_data.get('video_paths', {}),
                 'total_frames': traj_data.get('total_frames', 0),
+                'fps': processor_config.get('target_fps', 5.0),
                 'metadata': traj_data.get('metadata', {})
             }
 

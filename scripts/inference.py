@@ -233,10 +233,15 @@ def extract_features(
 
     # Initialize extractors
     dino_extractor = DinoFeatureExtractor(device=str(device))
+    
+    # Infer FPS from data length (assume this matches preprocessing)
+    # Default to 5.0 fps which is the typical target_fps
+    inferred_fps = 5.0
+    
     proprio_embedder = DroidTokenEmbedder(
         config=FastTokenizerConfig(
-            time_s=window_size / 30.0,
-            frame_frequency=30.0,
+            time_s=window_size / inferred_fps,
+            frame_frequency=inferred_fps,
             action_dim=proprio_data.shape[1],
             vocab_size=vocab_size
         )

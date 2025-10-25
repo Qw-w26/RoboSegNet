@@ -92,6 +92,7 @@ class TrainingDatasetConfig:
     # Vocabulary and tokenization
     vocab_size: int = 2048
     action_dim: int = 14
+    fps: float = 5.0  # Target FPS for data (should match preprocessing)
 
     # Parallel processing
     num_workers: int = 4
@@ -144,8 +145,8 @@ class BoundaryDataset(Dataset):
         # Initialize feature extractors
         self.proprio_embedder = DroidTokenEmbedder(
             config=FastTokenizerConfig(
-                time_s=config.window_size / 30.0,  # Assuming 30 fps
-                frame_frequency=30.0,
+                time_s=config.window_size / config.fps,
+                frame_frequency=config.fps,
                 action_dim=config.action_dim,
                 vocab_size=config.vocab_size
             )
