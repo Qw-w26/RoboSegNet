@@ -7,18 +7,16 @@ This module provides a PyTorch Dataset that:
 - Caches features for fast reloading
 - Creates sliding windows for temporal context
 
-Ported and refactored from andrew's excellent training_dataset.py.
-
 Example:
     >>> from training import TrainingDatasetConfig, BoundaryDataset
-    >>> from data.splits import load_split_manifest
+    >>> from data import load_parquet_split
     >>>
-    >>> # Load data split
-    >>> split = load_split_manifest('splits/task_327_train.json')
+    >>> # Load data split from parquet
+    >>> trajectories = load_parquet_split('train', splits_dir='./splits')
     >>>
     >>> # Create dataset
     >>> config = TrainingDatasetConfig(window_size=180, stride=10)
-    >>> dataset = BoundaryDataset(split.trajectories, config)
+    >>> dataset = BoundaryDataset(trajectories, config)
     >>>
     >>> # Use with DataLoader
     >>> from torch.utils.data import DataLoader
@@ -320,24 +318,33 @@ class BoundaryDataset(Dataset):
     def _parse_trajectory(self, traj: Any) -> Tuple[int, int, str, Dict, List]:
         """Parse trajectory data into standard format.
 
-        Override this method to support different trajectory data formats.
+        Supports ParquetTrajectory from parquet_loader.
 
         Returns:
             Tuple of (task_id, episode_id, video_path, proprio_data, intervals)
         """
-        # Default implementation - assumes andrew's AgibotDatapoint format
-        # Override for different formats
+        # Extract basic fields
         task_id = getattr(traj, 'task_id', 0)
         episode_id = getattr(traj, 'episode_id', 0)
-        video_path = getattr(traj, 'videos_paths', {}).get('head_color', '')
+
+        # Get video path - prefer head_color camera
+        videos_paths = getattr(traj, 'videos_paths', {})
+        video_path = videos_paths.get('head_color', '')
+
+        # Extract proprioception
         proprio = getattr(traj, 'proprio', None)
-        intervals = getattr(traj, 'intervals', [])
+
+        if proprio is None:
+            raise ValueError(f"Trajectory {task_id}/{episode_id} has no proprioception data")
 
         # Convert proprio to dict format
         proprio_data = {
-            'joint_positions': proprio.joint_position if proprio else None,
-            'timestamps': proprio.timestamps if proprio else None
+            'joint_positions': proprio.joint_position,
+            'timestamps': proprio.timestamps
         }
+
+        # Get intervals/segments
+        intervals = getattr(traj, 'intervals', [])
 
         return task_id, episode_id, video_path, proprio_data, intervals
 
@@ -484,10 +491,10 @@ class BoundaryDataset(Dataset):
         """Extract proprioceptive features for windows."""
         begin_frames = [window.begin_frame for window in windows]
 
-        # Convert to format expected by embedder
-        # This assumes proprio_data has 'joint_positions' and 'timestamps'
+        # FIXED: Pass joint_positions numpy array, not the full dict
+        # embed_frames expects: (joint_positions: np.ndarray, frames: List[int], window_size: int)
         features = self.proprio_embedder.embed_frames(
-            proprio_data,
+            proprio_data['joint_positions'],  # Pass numpy array, not dict
             begin_frames,
             self.config.window_size
         )

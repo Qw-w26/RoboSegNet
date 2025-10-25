@@ -1,0 +1,27 @@
+# Base data configuration
+# Default data loading and preprocessing settings
+
+# Paths (override in experiment configs)
+splits_dir: ./splits
+cache_dir: ./cache
+
+# Dataset parameters
+window_size: 180
+stride: 10
+fps: 5.0
+action_dim: 14
+
+# DataLoader
+batch_size: 512
+num_workers: 4
+pin_memory: true
+
+# Feature extraction
+vocab_size: 2048  # Must match model.vocab_size
+label_smoother_type: gaussian
+label_smoother_sigma: 5.0
+label_smoother_peak_value: 1.0
+
+# Processing
+ray_num_workers: 4
+max_samples: null  # null = use all samples

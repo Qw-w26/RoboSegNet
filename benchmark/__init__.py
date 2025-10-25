@@ -9,7 +9,6 @@ from data import (
     TrajectoryData,
     SegmentAnnotation,
     AgiBotWorldDataset,
-    AgiBotHFDirectDataset
 )
 from benchmark.methods import (
     BaseSegmentationMethod,
@@ -40,7 +39,6 @@ __all__ = [
     'TrajectoryData',
     'SegmentAnnotation',
     'AgiBotWorldDataset',
-    'AgiBotHFDirectDataset',
     # Methods
     'BaseSegmentationMethod',
     'WindowBasedSegmentationMethod',

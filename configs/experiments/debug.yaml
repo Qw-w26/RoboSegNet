@@ -1,0 +1,72 @@
+# Debug configuration for fast iteration
+# Smaller model, less data, fewer epochs
+
+experiment_name: debug_run
+
+model:
+  vocab_size: 512  # Smaller for speed
+  token_embed_dim: 64
+  hidden_dims: [256, 128]
+  prediction_window_size: 18
+  use_proprio: true
+  use_dino: true
+  transformer_dropout: 0.1
+  embedding_dropout: 0.1
+  dino_encoder_dropout: 0.1
+  mlp_dropout: 0.1
+  feature_noise_std: 0.0  # Disable for debugging
+
+data:
+  splits_dir: ./splits
+  cache_dir: ./cache
+
+  window_size: 180
+  stride: 10
+  fps: 5.0
+  action_dim: 14
+
+  batch_size: 32  # Small batch for debugging
+  num_workers: 2
+  pin_memory: false
+
+  vocab_size: 512
+  label_smoother_type: gaussian
+  label_smoother_sigma: 5.0
+  label_smoother_peak_value: 1.0
+
+  ray_num_workers: 2
+  max_samples: 100  # Limit samples for fast debugging
+
+training:
+  num_epochs: 5  # Just a few epochs
+  learning_rate: 0.01
+  weight_decay: 0.0001
+  optimizer: adam
+
+  scheduler: null  # Disable for debugging
+
+  loss_type: bce
+  loss_pos_weight: 10.0
+
+  gradient_clip_val: 1.0
+  use_amp: false
+
+  checkpoint_dir: ./checkpoints/debug
+  save_every: 1
+  save_best_only: false
+
+  early_stopping: false
+
+  log_every: 1  # Log every batch
+  log_plots_every: 1
+  num_plots: 2
+
+  device: auto
+  seed: 42
+
+wandb:
+  enabled: false
+  project: task-segmentation
+  name: debug_run
+  tags: [debug]
+  mode: disabled

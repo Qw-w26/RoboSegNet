@@ -7,7 +7,7 @@ This package provides:
 - Data loading and management (data/)
 - Embedding generation (embedding/)
 - Benchmark framework (benchmark/)
-- Model architectures (model/)
+- Model architectures (models/)
 - Training utilities (training/)
 
 Quick Start:
@@ -39,7 +39,7 @@ from benchmark import (
     evaluate_segmentation
 )
 
-from model import (
+from models import (
     BoundaryPredictionMLP,
     FocalLoss,
     create_model

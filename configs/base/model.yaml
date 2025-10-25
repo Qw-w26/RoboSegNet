@@ -1,0 +1,16 @@
+# Base model configuration
+# Default architecture settings for boundary prediction
+
+vocab_size: 2048
+token_embed_dim: 128
+hidden_dims: [512, 256, 128]
+prediction_window_size: 18
+
+use_proprio: true
+use_dino: true
+
+transformer_dropout: 0.3
+embedding_dropout: 0.1
+dino_encoder_dropout: 0.3
+mlp_dropout: 0.3
+feature_noise_std: 0.05

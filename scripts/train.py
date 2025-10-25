@@ -1,50 +1,43 @@
 #!/usr/bin/env python3
-"""Training script for boundary prediction models.
+"""Training script for boundary prediction models using YAML configuration.
 
-This script provides a complete training pipeline with:
-- Configuration via dataclasses (or Hydra in the future)
-- Multi-modal feature extraction (DINO + Fast-DROID)
-- Flexible callback system (WandB, checkpointing, early stopping)
-- Automatic experiment tracking and reproducibility
+This script provides a clean training pipeline with YAML-based configuration.
+All parameters are specified in YAML config files, with optional CLI overrides.
 
 Example usage:
     # Basic training
-    python scripts/train.py --task-ids 327 --num-epochs 100
+    python scripts/train.py --config configs/experiments/task_357.yaml
 
     # With WandB logging
-    python scripts/train.py --task-ids 327 --wandb-project my-project
+    python scripts/train.py --config configs/experiments/task_357.yaml \\
+        wandb.enabled=true
 
-    # Resume from checkpoint
-    python scripts/train.py --resume ./checkpoints/best_model.pt
+    # Override parameters
+    python scripts/train.py --config configs/experiments/task_357.yaml \\
+        training.learning_rate=0.001 \\
+        data.batch_size=256
 
-    # Custom configuration
-    python scripts/train.py --config configs/task_327.json
+    # Debug mode
+    python scripts/train.py --config configs/experiments/debug.yaml
 
 Author: Claude Code
-Date: October 24, 2025
+Date: October 25, 2025
 """
 
 import argparse
 import sys
-import os
 from pathlib import Path
-from typing import Optional
-import json
-from dataclasses import asdict
-
-# Disable tokenizers parallelism warning
-os.environ['TOKENIZERS_PARALLELISM'] = 'false'
-
-import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.optim.lr_scheduler import CosineAnnealingLR
-from torch.utils.data import DataLoader
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from models import create_model, ModelConfig
+import torch
+import torch.optim as optim
+from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.utils.data import DataLoader
+
+from config import load_config, validate_config, parse_cli_overrides
+from models import create_model
 from models.losses import get_loss_function
 from training import (
     BoundaryDataset,
@@ -54,194 +47,32 @@ from training import (
     WandBCallback,
     CheckpointCallback,
     EarlyStoppingCallback,
-    TensorBoardCallback,
     LearningRateSchedulerCallback,
-    TrainingConfig,
-    WandBConfig
 )
-from data.splits import load_split_manifest
+from data import load_parquet_split
 from utils.reproducibility import set_all_seeds
 
 
 def parse_args() -> argparse.Namespace:
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        description='Train boundary prediction model',
+        description='Train boundary prediction model with YAML config',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
 
-    # Data
-    parser.add_argument(
-        '--task-ids',
-        type=int,
-        nargs='+',
-        help='Task IDs to train on (alternative to using split manifests)'
-    )
-
-    parser.add_argument(
-        '--train-split',
-        type=str,
-        help='Path to train split manifest JSON'
-    )
-
-    parser.add_argument(
-        '--val-split',
-        type=str,
-        help='Path to validation split manifest JSON'
-    )
-
-    parser.add_argument(
-        '--cache-dir',
-        type=str,
-        default='./cache',
-        help='Cache directory for features'
-    )
-
-    parser.add_argument(
-        '--fps',
-        type=float,
-        default=5.0,
-        help='Target FPS for data (should match preprocessing target_fps)'
-    )
-
-    # Model
-    parser.add_argument(
-        '--vocab-size',
-        type=int,
-        default=2048,
-        help='Tokenizer vocabulary size'
-    )
-
-    parser.add_argument(
-        '--prediction-window-size',
-        type=int,
-        default=18,
-        help='Prediction window size'
-    )
-
-    # Training
-    parser.add_argument(
-        '--batch-size',
-        type=int,
-        default=512,
-        help='Batch size'
-    )
-
-    parser.add_argument(
-        '--num-epochs',
-        type=int,
-        default=100,
-        help='Number of training epochs'
-    )
-
-    parser.add_argument(
-        '--learning-rate',
-        type=float,
-        default=3e-3,
-        help='Learning rate'
-    )
-
-    parser.add_argument(
-        '--weight-decay',
-        type=float,
-        default=1e-4,
-        help='Weight decay'
-    )
-
-    parser.add_argument(
-        '--loss-type',
-        type=str,
-        default='bce',
-        choices=['bce', 'focal', 'soft_focal', 'weighted_bce'],
-        help='Loss function type'
-    )
-
-    parser.add_argument(
-        '--bce-pos-weight',
-        type=float,
-        default=10.0,
-        help='Positive class weight for BCE loss'
-    )
-
-    # Callbacks
-    parser.add_argument(
-        '--wandb-project',
-        type=str,
-        default=None,
-        help='WandB project name (enables WandB logging)'
-    )
-
-    parser.add_argument(
-        '--wandb-run-name',
-        type=str,
-        default=None,
-        help='WandB run name'
-    )
-
-    parser.add_argument(
-        '--wandb-offline',
-        action='store_true',
-        help='Run WandB in offline mode'
-    )
-
-    parser.add_argument(
-        '--checkpoint-dir',
-        type=str,
-        default='./checkpoints',
-        help='Checkpoint directory'
-    )
-
-    parser.add_argument(
-        '--save-every',
-        type=int,
-        default=10,
-        help='Save checkpoint every N epochs'
-    )
-
-    parser.add_argument(
-        '--early-stopping',
-        action='store_true',
-        help='Enable early stopping'
-    )
-
-    parser.add_argument(
-        '--patience',
-        type=int,
-        default=10,
-        help='Early stopping patience'
-    )
-
-    # System
-    parser.add_argument(
-        '--device',
-        type=str,
-        default='auto',
-        choices=['auto', 'cuda', 'cpu'],
-        help='Device to use'
-    )
-
-    parser.add_argument(
-        '--num-workers',
-        type=int,
-        default=4,
-        help='Number of data loader workers'
-    )
-
-    parser.add_argument(
-        '--seed',
-        type=int,
-        default=42,
-        help='Random seed'
-    )
-
-    # Config file
     parser.add_argument(
         '--config',
         type=str,
-        help='Path to JSON config file (overrides CLI args)'
+        required=True,
+        help='Path to YAML config file (e.g., configs/experiments/task_357.yaml)'
     )
 
-    # Resume
+    parser.add_argument(
+        'overrides',
+        nargs='*',
+        help='Config overrides in key=value format (e.g., training.lr=0.001)'
+    )
+
     parser.add_argument(
         '--resume',
         type=str,
@@ -251,312 +82,191 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def load_config_from_file(config_path: str) -> dict:
-    """Load configuration from JSON file."""
-    with open(config_path) as f:
-        return json.load(f)
+def main():
+    """Main training function."""
+    args = parse_args()
 
+    # Parse CLI overrides
+    overrides = parse_cli_overrides(args.overrides) if args.overrides else None
 
-def create_datasets(
-    args: argparse.Namespace,
-    device: torch.device
-) -> tuple:
-    """Create training and validation datasets.
+    # Load configuration
+    print("="*80)
+    print("Loading configuration...")
+    print("="*80)
+    config = load_config(args.config, overrides=overrides)
+    validate_config(config)
 
-    Args:
-        args: Command line arguments
-        device: Device for feature extraction
+    print(f"Experiment: {config.experiment_name}")
+    print(f"Config file: {args.config}")
+    if overrides:
+        print(f"Overrides: {overrides}")
 
-    Returns:
-        Tuple of (train_dataset, val_dataset)
-    """
+    # Set random seed
+    set_all_seeds(config.training.seed)
+    print(f"Random seed: {config.training.seed}")
+
+    # Setup device
+    if config.training.device == 'auto':
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    else:
+        device = torch.device(config.training.device)
+    print(f"Device: {device}")
+
+    # Load data
     print("\n" + "="*80)
-    print("Creating datasets...")
+    print("Loading data...")
     print("="*80)
 
-    # Dataset configuration
+    train_trajectories = load_parquet_split('train', splits_dir=config.data.splits_dir)
+    val_trajectories = load_parquet_split('val', splits_dir=config.data.splits_dir)
+
+    # Create datasets
     dataset_config = TrainingDatasetConfig(
-        window_size=180,
-        stride=10,
-        vocab_size=args.vocab_size,
-        fps=args.fps,
-        num_workers=args.num_workers,
+        window_size=config.data.window_size,
+        stride=config.data.stride,
+        vocab_size=config.data.vocab_size,
+        fps=config.data.fps,
+        num_workers=config.data.ray_num_workers,
         device=str(device),
         ray_worker_device=str(device),
-        cache_path=args.cache_dir
+        cache_path=config.data.cache_dir,
+        label_smoother_type=config.data.label_smoother_type,
+        label_smoother_sigma=config.data.label_smoother_sigma,
+        label_smoother_peak_value=config.data.label_smoother_peak_value,
+        action_dim=config.data.action_dim,
+        max_samples=config.data.max_samples
     )
 
-    # Load training data
-    if args.train_split:
-        print(f"Loading training split from {args.train_split}")
-        train_manifest = load_split_manifest(args.train_split)
-        train_trajectories = train_manifest.trajectories
-    elif args.task_ids:
-        print(f"Loading training data for tasks: {args.task_ids}")
-        # Load from task IDs
-        from agibot.dataset.simple_dataloader import create_dataloader
-        data_loader = create_dataloader(task_ids=args.task_ids)
-        train_trajectories = list(data_loader)
-    else:
-        raise ValueError("Must specify either --train-split or --task-ids")
-
-    print(f"Creating training dataset from {len(train_trajectories)} trajectories...")
+    print("\nCreating training dataset...")
     train_dataset = BoundaryDataset(train_trajectories, dataset_config)
 
-    # Load validation data
-    val_dataset = None
-    if args.val_split:
-        print(f"\nLoading validation split from {args.val_split}")
-        val_manifest = load_split_manifest(args.val_split)
-        val_trajectories = val_manifest.trajectories
-
-        print(f"Creating validation dataset from {len(val_trajectories)} trajectories...")
-        val_dataset = BoundaryDataset(val_trajectories, dataset_config)
+    print("\nCreating validation dataset...")
+    val_dataset = BoundaryDataset(val_trajectories, dataset_config)
 
     print(f"\nDataset statistics:")
     print(f"  Training samples: {len(train_dataset)}")
-    if val_dataset:
-        print(f"  Validation samples: {len(val_dataset)}")
+    print(f"  Validation samples: {len(val_dataset)}")
 
-    return train_dataset, val_dataset
-
-
-def create_dataloaders(
-    train_dataset: BoundaryDataset,
-    val_dataset: Optional[BoundaryDataset],
-    args: argparse.Namespace
-) -> tuple:
-    """Create data loaders.
-
-    Args:
-        train_dataset: Training dataset
-        val_dataset: Validation dataset (optional)
-        args: Command line arguments
-
-    Returns:
-        Tuple of (train_loader, val_loader)
-    """
+    # Create data loaders
     print("\nCreating data loaders...")
-
     train_loader = DataLoader(
         train_dataset,
-        batch_size=args.batch_size,
+        batch_size=config.data.batch_size,
         shuffle=True,
-        num_workers=args.num_workers,
+        num_workers=config.data.num_workers,
         collate_fn=collate_dict,
-        pin_memory=True
+        pin_memory=config.data.pin_memory
     )
 
-    val_loader = None
-    if val_dataset:
-        val_loader = DataLoader(
-            val_dataset,
-            batch_size=args.batch_size,
-            shuffle=False,
-            num_workers=args.num_workers,
-            collate_fn=collate_dict,
-            pin_memory=True
-        )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=config.data.batch_size,
+        shuffle=False,
+        num_workers=config.data.num_workers,
+        collate_fn=collate_dict,
+        pin_memory=config.data.pin_memory
+    )
 
     print(f"  Train batches: {len(train_loader)}")
-    if val_loader:
-        print(f"  Val batches: {len(val_loader)}")
+    print(f"  Val batches: {len(val_loader)}")
 
-    return train_loader, val_loader
-
-
-def create_model_and_optimizer(
-    args: argparse.Namespace,
-    device: torch.device
-) -> tuple:
-    """Create model, optimizer, scheduler, and loss function.
-
-    Args:
-        args: Command line arguments
-        device: Device to use
-
-    Returns:
-        Tuple of (model, optimizer, scheduler, criterion)
-    """
+    # Create model
     print("\n" + "="*80)
     print("Creating model...")
     print("="*80)
 
-    # Model configuration
-    model_config = ModelConfig(
-        vocab_size=args.vocab_size,
-        prediction_window_size=args.prediction_window_size,
-        use_dino=True,
-        use_proprio=True
-    )
-
-    model = create_model(model_config, device=device)
-
+    model = create_model(config.model, device=device)
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
 
-    # Optimizer
+    # Create optimizer
     optimizer = optim.Adam(
         model.parameters(),
-        lr=args.learning_rate,
-        weight_decay=args.weight_decay
+        lr=config.training.learning_rate,
+        weight_decay=config.training.weight_decay
     )
 
-    # Scheduler
-    scheduler = CosineAnnealingLR(
-        optimizer,
-        T_max=args.num_epochs,
-        eta_min=1e-6
-    )
+    # Create scheduler
+    scheduler = None
+    if config.training.scheduler == 'cosine':
+        scheduler = CosineAnnealingLR(
+            optimizer,
+            T_max=config.training.num_epochs,
+            eta_min=config.training.min_lr
+        )
 
-    # Loss function
-    if args.loss_type == 'bce':
-        criterion = nn.BCEWithLogitsLoss(
-            pos_weight=torch.tensor(args.bce_pos_weight)
+    # Create loss function
+    if config.training.loss_type == 'bce':
+        criterion = torch.nn.BCEWithLogitsLoss(
+            pos_weight=torch.tensor(config.training.loss_pos_weight)
         )
     else:
         criterion = get_loss_function(
-            args.loss_type,
-            pos_weight=args.bce_pos_weight
+            config.training.loss_type,
+            pos_weight=config.training.loss_pos_weight,
+            alpha=config.training.loss_alpha,
+            gamma=config.training.loss_gamma
         )
 
-    print(f"Optimizer: Adam (lr={args.learning_rate}, weight_decay={args.weight_decay})")
-    print(f"Scheduler: CosineAnnealingLR")
-    print(f"Loss: {args.loss_type}")
+    print(f"Optimizer: Adam (lr={config.training.learning_rate}, wd={config.training.weight_decay})")
+    print(f"Scheduler: {config.training.scheduler}")
+    print(f"Loss: {config.training.loss_type}")
 
-    return model, optimizer, scheduler, criterion
+    # Resume from checkpoint if specified
+    start_epoch = 0
+    if args.resume:
+        print(f"\nLoading checkpoint from {args.resume}")
+        checkpoint = torch.load(args.resume)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        if scheduler and 'scheduler_state_dict' in checkpoint:
+            scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        start_epoch = checkpoint.get('epoch', 0)
+        print(f"Resumed from epoch {start_epoch}")
 
+    # Create callbacks
+    print("\n" + "="*80)
+    print("Configuring callbacks...")
+    print("="*80)
 
-def create_callbacks(args: argparse.Namespace) -> list:
-    """Create training callbacks.
-
-    Args:
-        args: Command line arguments
-
-    Returns:
-        List of callback instances
-    """
     callbacks = []
 
     # WandB callback
-    if args.wandb_project:
+    if config.wandb.enabled:
         wandb_callback = WandBCallback(
-            project=args.wandb_project,
-            name=args.wandb_run_name,
-            config=vars(args),
-            log_plots_every=3,
-            num_plots=3,
-            offline=args.wandb_offline
+            project=config.wandb.project,
+            name=config.wandb.name or config.experiment_name,
+            config=config.to_dict(),
+            log_plots_every=config.training.log_plots_every,
+            num_plots=config.training.num_plots,
+            offline=(config.wandb.mode == 'offline')
         )
         callbacks.append(wandb_callback)
         print("✓ WandB logging enabled")
 
     # Checkpoint callback
     checkpoint_callback = CheckpointCallback(
-        save_dir=args.checkpoint_dir,
+        save_dir=config.training.checkpoint_dir,
         monitor='val_loss',
         mode='min',
-        save_every=args.save_every
+        save_every=config.training.save_every
     )
     callbacks.append(checkpoint_callback)
-    print(f"✓ Checkpointing enabled (save_dir={args.checkpoint_dir})")
+    print(f"✓ Checkpointing enabled (save_dir={config.training.checkpoint_dir})")
 
     # Early stopping callback
-    if args.early_stopping:
+    if config.training.early_stopping:
         early_stopping_callback = EarlyStoppingCallback(
             monitor='val_loss',
-            patience=args.patience,
+            patience=config.training.patience,
             mode='min'
         )
         callbacks.append(early_stopping_callback)
-        print(f"✓ Early stopping enabled (patience={args.patience})")
+        print(f"✓ Early stopping enabled (patience={config.training.patience})")
 
-    return callbacks
-
-
-def load_checkpoint(
-    checkpoint_path: str,
-    model: nn.Module,
-    optimizer: optim.Optimizer,
-    scheduler: Optional[any] = None
-) -> int:
-    """Load checkpoint and restore training state.
-
-    Args:
-        checkpoint_path: Path to checkpoint file
-        model: Model to restore
-        optimizer: Optimizer to restore
-        scheduler: Scheduler to restore (optional)
-
-    Returns:
-        Epoch number to resume from
-    """
-    print(f"\nLoading checkpoint from {checkpoint_path}")
-
-    checkpoint = torch.load(checkpoint_path)
-
-    model.load_state_dict(checkpoint['model_state_dict'])
-    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-
-    if scheduler and 'scheduler_state_dict' in checkpoint:
-        scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-
-    epoch = checkpoint.get('epoch', 0)
-
-    print(f"Resumed from epoch {epoch}")
-
-    return epoch
-
-
-def main():
-    """Main training function."""
-    args = parse_args()
-
-    # Load config from file if specified
-    if args.config:
-        config = load_config_from_file(args.config)
-        # Update args with config
-        for key, value in config.items():
-            setattr(args, key, value)
-
-    # Print banner
-    print("="*80)
-    print("Boundary Prediction Model Training")
-    print("="*80)
-
-    # Set random seed
-    set_all_seeds(args.seed)
-    print(f"Random seed: {args.seed}")
-
-    # Setup device
-    if args.device == 'auto':
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    else:
-        device = torch.device(args.device)
-    print(f"Device: {device}")
-
-    # Create datasets
-    train_dataset, val_dataset = create_datasets(args, device)
-
-    # Create data loaders
-    train_loader, val_loader = create_dataloaders(train_dataset, val_dataset, args)
-
-    # Create model, optimizer, scheduler, and loss
-    model, optimizer, scheduler, criterion = create_model_and_optimizer(args, device)
-
-    # Resume from checkpoint if specified
-    start_epoch = 0
-    if args.resume:
-        start_epoch = load_checkpoint(args.resume, model, optimizer, scheduler)
-
-    # Create callbacks
-    print("\n" + "="*80)
-    print("Configuring callbacks...")
-    print("="*80)
-    callbacks = create_callbacks(args)
-
-    # Add scheduler callback
-    scheduler_callback = LearningRateSchedulerCallback(scheduler)
-    callbacks.append(scheduler_callback)
+    # Scheduler callback
+    if scheduler:
+        scheduler_callback = LearningRateSchedulerCallback(scheduler)
+        callbacks.append(scheduler_callback)
 
     # Create trainer
     print("\n" + "="*80)
@@ -570,8 +280,8 @@ def main():
         device=device,
         callbacks=callbacks,
         scheduler=scheduler,
-        prediction_stride=10,
-        prediction_window_size=args.prediction_window_size
+        prediction_stride=config.data.stride,
+        prediction_window_size=config.model.prediction_window_size
     )
 
     # Train
@@ -582,9 +292,9 @@ def main():
     history = trainer.fit(
         train_loader=train_loader,
         val_loader=val_loader,
-        num_epochs=args.num_epochs,
-        log_every=10,
-        collect_plots_every=3
+        num_epochs=config.training.num_epochs,
+        log_every=config.training.log_every,
+        collect_plots_every=config.training.log_plots_every
     )
 
     print("\n" + "="*80)
@@ -596,7 +306,8 @@ def main():
     if val_loader:
         print(f"Final validation loss: {history['val_loss'][-1]:.4f}")
 
-    print(f"\nCheckpoints saved to: {args.checkpoint_dir}")
+    print(f"\nCheckpoints saved to: {config.training.checkpoint_dir}")
+    print(f"Experiment: {config.experiment_name}")
 
 
 if __name__ == '__main__':

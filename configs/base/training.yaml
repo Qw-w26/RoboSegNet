@@ -1,0 +1,40 @@
+# Base training configuration
+# Default training loop settings
+
+# Training
+num_epochs: 100
+learning_rate: 0.003
+weight_decay: 0.0001
+optimizer: adam
+
+# Scheduler
+scheduler: cosine
+min_lr: 0.000001
+
+# Loss
+loss_type: bce
+loss_pos_weight: 10.0
+loss_alpha: 0.25
+loss_gamma: 2.0
+
+# Regularization
+gradient_clip_val: null  # null = disabled
+use_amp: false
+
+# Checkpointing
+checkpoint_dir: ./checkpoints
+save_every: 10
+save_best_only: true
+
+# Early stopping
+early_stopping: false
+patience: 10
+
+# Logging
+log_every: 10
+log_plots_every: 3
+num_plots: 3
+
+# System
+device: auto  # auto = cuda if available, else cpu
+seed: 42

@@ -16,12 +16,9 @@ from .callbacks import (
     TensorBoardCallback,
     LearningRateSchedulerCallback
 )
-from .config import (
-    TrainingConfig,
-    WandBConfig,
-    TensorBoardConfig,
-    DataConfig
-)
+# Legacy config moved to config/config_schema.py
+# Import from there instead:
+# from config import TrainingConfig, WandBConfig, DataConfig
 from .label_smoothing import (
     LabelSmoother,
     GaussianSmoother,
@@ -53,11 +50,8 @@ __all__ = [
     'TensorBoardCallback',
     'LearningRateSchedulerCallback',
 
-    # Configuration
-    'TrainingConfig',
-    'WandBConfig',
-    'TensorBoardConfig',
-    'DataConfig',
+    # Configuration (moved to config/ module)
+    # Use: from config import TrainingConfig, WandBConfig, DataConfig
 
     # Label smoothing
     'LabelSmoother',

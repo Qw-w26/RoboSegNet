@@ -1,0 +1,11 @@
+# Base WandB configuration
+# Weights & Biases logging settings
+
+enabled: false
+project: task-segmentation
+entity: null  # Set to your team name
+name: null  # Auto-generated if null
+tags: []
+notes: null
+mode: online  # online, offline, or disabled
+log_model: true
