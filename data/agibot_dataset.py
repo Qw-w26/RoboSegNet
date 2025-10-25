@@ -31,22 +31,37 @@ class AgiBotTrajectoryData(TrajectoryData):
         if not self.proprioception_path or not self.proprioception_path.exists():
             return np.array([])
 
-        with h5py.File(self.proprioception_path, 'r') as f:
-            # AgiBotWorld stores proprioceptive data in H5 format
-            # The exact structure may vary, adjust as needed
-            if 'proprio' in f:
-                data = f['proprio'][:]
-            elif 'state' in f:
-                data = f['state'][:]
-            else:
-                # Try to get the first dataset
-                keys = list(f.keys())
-                if keys:
-                    data = f[keys[0]][:]
+        try:
+            with h5py.File(self.proprioception_path, 'r') as f:
+                # Try different possible data layouts
+                # Andrew's format uses 'state/joint/position' and 'state/effector/position'
+                if 'state' in f:
+                    if 'joint' in f['state'] and 'position' in f['state']['joint']:
+                        # Andrew's format - return joint positions
+                        data = f['state']['joint']['position'][:]
+                    else:
+                        data = f['state'][:]
+                elif 'proprio' in f:
+                    data = f['proprio'][:]
+                elif 'timestamp' in f:
+                    # Another possible format with timestamp and state data
+                    if 'state' in f:
+                        data = f['state'][:]
+                    else:
+                        # Just return timestamps if no state data
+                        data = f['timestamp'][:]
                 else:
-                    data = np.array([])
+                    # Try to get the first dataset
+                    keys = list(f.keys())
+                    if keys:
+                        data = f[keys[0]][:]
+                    else:
+                        data = np.array([])
 
-        return data
+            return data
+        except Exception as e:
+            print(f"Warning: Failed to load proprioception from {self.proprioception_path}: {e}")
+            return np.array([])
 
 
 class AgiBotWorldDataset(BaseSegmentationDataset):
@@ -156,17 +171,40 @@ class AgiBotWorldDataset(BaseSegmentationDataset):
         """Load trajectories from local filesystem."""
         trajectories = []
 
-        # Find task info JSON files
-        task_info_dir = self.data_root / 'task_info'
-        if not task_info_dir.exists():
-            raise ValueError(f"Task info directory not found: {task_info_dir}")
+        # Try two different directory structures
+        # 1. HuggingFace format: task_info/ at root
+        # 2. Andrew's format: task_*/task_info/task_*.json
 
-        # Get all task JSON files
-        if self.task_ids:
-            json_files = [task_info_dir / f"task_{tid}.json" for tid in self.task_ids]
-            json_files = [f for f in json_files if f.exists()]
-        else:
-            json_files = sorted(task_info_dir.glob("task_*.json"))
+        json_files = []
+
+        # First try HuggingFace format
+        task_info_dir = self.data_root / 'task_info'
+        if task_info_dir.exists():
+            # Get all task JSON files
+            if self.task_ids:
+                json_files = [task_info_dir / f"task_{tid}.json" for tid in self.task_ids]
+                json_files = [f for f in json_files if f.exists()]
+            else:
+                json_files = sorted(task_info_dir.glob("task_*.json"))
+
+        # If no files found, try Andrew's format
+        if not json_files:
+            print(f"No task_info directory at root, checking task subdirectories...")
+            if self.task_ids:
+                for tid in self.task_ids:
+                    task_dir = self.data_root / f'task_{tid}' / 'task_info' / f'task_{tid}.json'
+                    if task_dir.exists():
+                        json_files.append(task_dir)
+            else:
+                # Find all task_*/task_info/task_*.json files
+                for task_dir in sorted(self.data_root.glob("task_*")):
+                    task_info_path = task_dir / 'task_info'
+                    if task_info_path.exists():
+                        task_json_files = list(task_info_path.glob("task_*.json"))
+                        json_files.extend(task_json_files)
+
+        if not json_files:
+            raise ValueError(f"No task JSON files found in {self.data_root}")
 
         print(f"Loading AgiBotWorld dataset from {len(json_files)} task files...")
 
@@ -275,10 +313,23 @@ class AgiBotWorldDataset(BaseSegmentationDataset):
 
         trajectories = []
 
+        # Extract task_id from filename if not in episode data
+        default_task_id = None
+        if 'task_' in json_path.stem:
+            try:
+                default_task_id = int(json_path.stem.split('task_')[1])
+            except (ValueError, IndexError):
+                pass
+
         for episode in episodes:
             # Extract basic info
             episode_id = episode['episode_id']
-            task_id = episode['task_id']
+            task_id = episode.get('task_id', default_task_id)
+
+            if task_id is None:
+                print(f"Warning: Could not determine task_id for episode {episode_id}")
+                continue
+
             task_name = episode.get('task_name', '')
             init_scene_text = episode.get('init_scene_text', '')
 
@@ -298,22 +349,39 @@ class AgiBotWorldDataset(BaseSegmentationDataset):
                     )
                     segments.append(segment)
 
-            # Find data paths
-            proprio_path = self.data_root / 'proprio_stats' / str(task_id) / f"{episode_id}.h5"
-            obs_dir = self.data_root / 'observations' / str(task_id) / str(episode_id)
+            # Find data paths - handle both directory structures
+            # Try Andrew's format first: task_*/observations/episode_id
+            obs_dir = self.data_root / f'task_{task_id}' / 'observations' / str(episode_id)
+            proprio_path = self.data_root / 'proprio_stats' / str(task_id) / str(episode_id) / 'proprio_stats.h5'
+
+            # If not found, try HuggingFace format: observations/task_id/episode_id
+            if not obs_dir.exists():
+                obs_dir = self.data_root / 'observations' / str(task_id) / str(episode_id)
+
+            # If proprio not found, try without the extra proprio_stats.h5 name
+            if not proprio_path.exists():
+                proprio_path = self.data_root / 'proprio_stats' / str(task_id) / f"{episode_id}.h5"
 
             # Find video files
             video_paths = {}
             if obs_dir.exists():
+                # Look for video files in the observations directory
                 for video_file in obs_dir.glob("*.mp4"):
                     # Extract camera name from filename (e.g., 'wrist.mp4' -> 'wrist')
                     camera_name = video_file.stem
                     video_paths[camera_name] = video_file
 
+                # Also check for videos in a videos subdirectory
+                videos_dir = obs_dir / 'videos'
+                if videos_dir.exists():
+                    for video_file in videos_dir.glob("*.mp4"):
+                        camera_name = video_file.stem
+                        video_paths[camera_name] = video_file
+
             # Create trajectory data
             trajectory = AgiBotTrajectoryData(
                 trajectory_id=f"{task_id}_{episode_id}",
-                task_id=str(task_id),
+                task_id=task_id,  # Keep as int
                 task_name=task_name,
                 proprioception_path=proprio_path if proprio_path.exists() else None,
                 video_paths=video_paths if video_paths else None,

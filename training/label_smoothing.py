@@ -63,7 +63,7 @@ class GaussianSmoother(LabelSmoother):
             # Add to smoothed labels (allowing overlap)
             smoothed = np.maximum(smoothed, weights)
 
-        return smoothed
+        return smoothed.astype(np.float32)
 
     def get_config(self) -> Dict[str, Any]:
         return {
