@@ -52,6 +52,7 @@ from training import (
     CheckpointCallback,
     EarlyStoppingCallback,
     LearningRateSchedulerCallback,
+    EmbeddingVisualizationCallback,
 )
 from data import load_parquet_split
 from utils.reproducibility import set_all_seeds
@@ -130,10 +131,7 @@ def main():
         stride=config.data.stride,
         vocab_size=config.data.vocab_size,
         fps=config.data.fps,
-        num_workers=config.data.ray_num_workers,
         device=str(device),
-        ray_worker_device=str(device),
-        cache_path=config.data.cache_dir,
         label_smoother_type=config.data.label_smoother_type,
         label_smoother_sigma=config.data.label_smoother_sigma,
         label_smoother_peak_value=config.data.label_smoother_peak_value,
@@ -271,6 +269,19 @@ def main():
     if scheduler:
         scheduler_callback = LearningRateSchedulerCallback(scheduler)
         callbacks.append(scheduler_callback)
+
+    # Embedding visualization callback (only if WandB is enabled)
+    if config.wandb.enabled:
+        embedding_vis_callback = EmbeddingVisualizationCallback(
+            method='pca',  # Fast PCA visualization
+            num_trajectories=3,  # Visualize 3 trajectories per split
+            max_windows_per_traj=None,  # Include all windows
+            log_on_save=True,  # Log when best model is saved
+            log_on_first=True,  # Log on first epoch
+            log_on_last=True  # Log at end of training
+        )
+        callbacks.append(embedding_vis_callback)
+        print("✓ Trajectory embedding visualization enabled (logs on best model save)")
 
     # Create trainer
     print("\n" + "="*80)

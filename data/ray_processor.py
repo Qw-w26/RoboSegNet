@@ -31,7 +31,7 @@ class TrajectoryProcessor:
         self,
         extract_dino: bool = True,
         extract_frames: bool = False,
-        dino_model_name: str = 'dinov2_vitb14',
+        dino_model_name: str = 'facebook/dinov3-vitl16-pretrain-lvd1689m',
         target_fps: float = 5.0,
         device: str = None,
         frames_dir: str = None
@@ -51,30 +51,28 @@ class TrajectoryProcessor:
 
         # Initialize DINO model if needed
         self.dino_model = None
-        self.dino_transform = None
+        self.dino_processor = None
         if extract_dino:
             self._init_dino_model()
 
     def _init_dino_model(self):
-        """Initialize DINO model for feature extraction."""
+        """Initialize DINOv3 model for feature extraction."""
         try:
-            from torchvision import transforms
+            from transformers import AutoModel, AutoProcessor
 
-            # Load DINOv2 model
-            self.dino_model = torch.hub.load('facebookresearch/dinov2', self.dino_model_name)
+            # Load DINOv3 model from HuggingFace
+            self.dino_model = AutoModel.from_pretrained(
+                self.dino_model_name,
+                trust_remote_code=True
+            )
             self.dino_model = self.dino_model.to(self.device)
             self.dino_model.eval()
 
-            # DINO preprocessing
-            self.dino_transform = transforms.Compose([
-                transforms.ToPILImage(),
-                transforms.Resize((224, 224)),
-                transforms.ToTensor(),
-                transforms.Normalize(
-                    mean=[0.485, 0.456, 0.406],
-                    std=[0.229, 0.224, 0.225]
-                )
-            ])
+            # Load processor for preprocessing
+            self.dino_processor = AutoProcessor.from_pretrained(
+                self.dino_model_name,
+                trust_remote_code=True
+            )
         except Exception as e:
             print(f"Warning: Could not initialize DINO model: {e}")
             self.extract_dino = False
@@ -98,17 +96,47 @@ class TrajectoryProcessor:
             dino_features = None
             image_paths = None
 
-            if 'video_paths' in trajectory_data and trajectory_data['video_paths']:
-                # Use only head_color camera
-                video_paths = trajectory_data['video_paths']
-                if isinstance(video_paths, dict) and 'head_color' in video_paths:
-                    video_path = Path(video_paths['head_color'])
+            # Check if DINO/frame extraction is requested
+            if self.extract_dino or self.extract_frames:
+                # Validate video paths exist
+                if 'video_paths' not in trajectory_data or not trajectory_data['video_paths']:
+                    raise ValueError(
+                        f"Trajectory {trajectory_id} has no video_paths. "
+                        f"Cannot extract DINO features or frames without videos. "
+                        f"Please ensure video files are available in the source data."
+                    )
 
-                    if video_path.exists():
-                        if self.extract_dino:
-                            dino_features = self._extract_dino_features(video_path)
-                        if self.extract_frames:
-                            image_paths = self._extract_and_save_frames(video_path, trajectory_id)
+                video_paths = trajectory_data['video_paths']
+                if not isinstance(video_paths, dict) or 'head_color' not in video_paths:
+                    raise ValueError(
+                        f"Trajectory {trajectory_id} missing 'head_color' camera in video_paths. "
+                        f"Available cameras: {list(video_paths.keys()) if isinstance(video_paths, dict) else 'none'}"
+                    )
+
+                video_path = Path(video_paths['head_color'])
+
+                # Validate video file exists
+                if not video_path.exists():
+                    raise FileNotFoundError(
+                        f"Video file not found for trajectory {trajectory_id}: {video_path}\n"
+                        f"Please ensure video files are available at the correct location."
+                    )
+
+                if not video_path.is_file():
+                    raise ValueError(
+                        f"Video path is not a file for trajectory {trajectory_id}: {video_path}"
+                    )
+
+                # Extract features from validated video path
+                if self.extract_dino:
+                    dino_features = self._extract_dino_features(video_path)
+                if self.extract_frames:
+                    image_paths = self._extract_and_save_frames(video_path, trajectory_id)
+
+            # If not extracting visual features, still store video paths if available
+            elif 'video_paths' in trajectory_data and trajectory_data['video_paths']:
+                # Just store the video paths without validation (for reference only)
+                pass
 
             # Create frame labels from segments
             frame_labels = self._create_frame_labels(trajectory_data.get('segments', []))
@@ -134,7 +162,9 @@ class TrajectoryProcessor:
             return result
 
         except Exception as e:
-            print(f"Error processing trajectory {trajectory_data.get('trajectory_id', 'unknown')}: {e}")
+            traj_id = trajectory_data.get('trajectory_id', 'unknown')
+            print(f"\n❌ ERROR: Failed to process trajectory {traj_id}")
+            print(f"   Reason: {type(e).__name__}: {e}")
             return None
 
     def _create_frame_labels(self, segments: List[Dict]) -> np.ndarray:
@@ -225,11 +255,13 @@ class TrajectoryProcessor:
             return None, None
 
     def _extract_dino_features(self, video_path: Path) -> Optional[np.ndarray]:
-        """Extract DINO features from video using PyAV."""
+        """Extract DINOv3 features from video using PyAV."""
         if not self.dino_model:
             return None
 
         try:
+            from PIL import Image as PILImage
+
             container = av.open(str(video_path))
             stream = container.streams.video[0]
 
@@ -245,11 +277,16 @@ class TrajectoryProcessor:
                         # Convert to RGB numpy array
                         img = frame.to_ndarray(format='rgb24')
 
-                        # Apply DINO preprocessing
-                        frame_tensor = self.dino_transform(img).unsqueeze(0).to(self.device)
+                        # Convert to PIL Image for processor
+                        pil_img = PILImage.fromarray(img)
 
-                        # Extract features
-                        feature = self.dino_model(frame_tensor).cpu().numpy()
+                        # Process image with DINOv3 processor
+                        inputs = self.dino_processor(images=pil_img, return_tensors="pt")
+                        inputs = {k: v.to(self.device) for k, v in inputs.items()}
+
+                        # Extract features using [CLS] token
+                        outputs = self.dino_model(**inputs)
+                        feature = outputs.last_hidden_state[:, 0, :].cpu().numpy()
                         features.append(feature.squeeze())
 
                     frame_idx += 1

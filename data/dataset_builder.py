@@ -151,7 +151,7 @@ class DatasetBuilder:
         output_dir: Path,
         extract_dino: bool = True,
         extract_frames: bool = False,
-        dino_model: str = 'dinov2_vitb14',
+        dino_model: str = 'facebook/dinov3-vitl16-pretrain-lvd1689m',
         target_fps: float = 5.0,
         device: str = 'cuda' if torch.cuda.is_available() else 'cpu',
         num_workers: int = None
@@ -163,7 +163,7 @@ class DatasetBuilder:
             output_dir: Directory to save processed dataset
             extract_dino: Whether to extract DINO features
             extract_frames: Whether to extract individual frames
-            dino_model: DINO model variant to use
+            dino_model: DINO model variant to use (HuggingFace model name)
             target_fps: Target FPS for frame extraction (if different from video)
             device: Device for DINO extraction
             num_workers: Number of Ray workers (None = auto-detect)
@@ -229,6 +229,7 @@ class DatasetBuilder:
 
         # Convert dicts back to ProcessedTrajectory objects
         processed_trajectories = []
+        failed_count = 0
         for p_dict in processed_dicts:
             if p_dict is not None:
                 # Convert lists back to numpy arrays where needed
@@ -244,11 +245,20 @@ class DatasetBuilder:
                 # Create ProcessedTrajectory object
                 processed = ProcessedTrajectory(**p_dict)
                 processed_trajectories.append(processed)
+            else:
+                failed_count += 1
+
+        # Report results
+        print(f"Processed {len(processed_trajectories)} trajectories for {split_name}")
+        if failed_count > 0:
+            print(f"⚠️  WARNING: {failed_count} trajectories failed processing (see errors above)")
+            print(f"   Successfully processed: {len(processed_trajectories)}/{len(trajectories)}")
+            if self.extract_dino:
+                print(f"   Common causes: missing video files, invalid video paths")
+                print(f"   Trajectories with missing videos are excluded from the dataset")
 
         # Save processed dataset
         self._save_split(processed_trajectories, split_name)
-
-        print(f"Processed {len(processed_trajectories)} trajectories for {split_name}")
 
         return processed_trajectories
 

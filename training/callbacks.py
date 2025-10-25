@@ -576,3 +576,144 @@ class LearningRateSchedulerCallback(Callback):
                 self.scheduler.step(metric)
         elif hasattr(self.scheduler, 'step'):
             self.scheduler.step()
+
+
+class EmbeddingVisualizationCallback(Callback):
+    """Trajectory embedding visualization callback for training.
+
+    Visualizes trajectory embeddings showing temporal progression through
+    embedding space. Plots windows from selected trajectories colored by
+    timestep (window index).
+
+    Based on plot_fast_droid_embeddings.py - shows how embeddings evolve
+    temporally within trajectories.
+
+    Args:
+        method: Visualization method ('pca' or 'tsne')
+        num_trajectories: Number of trajectories to visualize per split
+        max_windows_per_traj: Maximum windows per trajectory (None = all)
+        log_on_save: Log plot when saving best model (default)
+        log_on_first: Also log on first epoch
+        log_on_last: Also log on last epoch
+
+    Example:
+        >>> callback = EmbeddingVisualizationCallback(
+        ...     method='pca',
+        ...     num_trajectories=3,
+        ...     log_on_save=True
+        ... )
+    """
+
+    def __init__(
+        self,
+        method: str = 'pca',
+        num_trajectories: int = 3,
+        max_windows_per_traj: Optional[int] = None,
+        log_on_save: bool = True,
+        log_on_first: bool = True,
+        log_on_last: bool = True
+    ):
+        self.method = method
+        self.num_trajectories = num_trajectories
+        self.max_windows_per_traj = max_windows_per_traj
+        self.log_on_save = log_on_save
+        self.log_on_first = log_on_first
+        self.log_on_last = log_on_last
+
+        # Track state
+        self.train_trajectories = None
+        self.val_trajectories = None
+        self.train_dataset = None
+        self.val_dataset = None
+        self.has_logged_first = False
+        self.best_val_loss = float('inf')
+
+    def on_train_begin(self, trainer: 'Trainer') -> None:
+        """Store references to trajectories and datasets."""
+        # Get datasets
+        if hasattr(trainer, 'train_loader') and trainer.train_loader:
+            self.train_dataset = trainer.train_loader.dataset
+            # Try to get original trajectories from dataset
+            if hasattr(self.train_dataset, 'trajectories'):
+                self.train_trajectories = self.train_dataset.trajectories
+
+        if hasattr(trainer, 'val_loader') and trainer.val_loader:
+            self.val_dataset = trainer.val_loader.dataset
+            if hasattr(self.val_dataset, 'trajectories'):
+                self.val_trajectories = self.val_dataset.trajectories
+
+        # Log on first epoch if requested
+        if self.log_on_first:
+            self._log_embeddings(trainer, epoch=0)
+            self.has_logged_first = True
+
+    def on_epoch_end(self, trainer: 'Trainer', epoch: int, logs: Dict[str, Any]) -> None:
+        """Log embeddings when best model is saved."""
+        # Check if this is a new best model
+        val_loss = logs.get('val_loss')
+        if val_loss is None:
+            return
+
+        is_best = val_loss < self.best_val_loss
+        if is_best:
+            self.best_val_loss = val_loss
+
+            if self.log_on_save:
+                self._log_embeddings(trainer, epoch)
+
+    def on_train_end(self, trainer: 'Trainer', logs: Dict[str, Any]) -> None:
+        """Log embeddings at end of training if requested."""
+        if self.log_on_last:
+            epoch = logs.get('epoch', -1)
+            self._log_embeddings(trainer, epoch, final=True)
+
+    def _log_embeddings(self, trainer: 'Trainer', epoch: int, final: bool = False) -> None:
+        """Generate and log embedding plots."""
+        # Check if wandb is available
+        try:
+            import wandb
+            if wandb.run is None:
+                return
+        except ImportError:
+            return
+
+        # Import visualizer
+        from utils.trajectory_embedding_visualizer import create_embedding_plot_for_logging
+
+        # Check if we have data
+        if not (self.train_trajectories and self.train_dataset):
+            warnings.warn("No trajectory data available for embedding visualization")
+            return
+
+        print(f"\nGenerating trajectory embedding visualization (epoch {epoch+1})...")
+
+        try:
+            # Create plots
+            figures = create_embedding_plot_for_logging(
+                self.train_trajectories,
+                self.val_trajectories,
+                self.train_dataset,
+                self.val_dataset,
+                method=self.method,
+                num_trajectories_per_split=self.num_trajectories,
+                max_windows_per_traj=self.max_windows_per_traj
+            )
+
+            # Log to wandb
+            log_dict = {}
+            if 'train' in figures:
+                log_dict['embeddings/train_trajectory'] = wandb.Image(figures['train'])
+                plt.close(figures['train'])
+                print(f"  ✓ Logged training trajectory embedding plot")
+
+            if 'val' in figures:
+                log_dict['embeddings/val_trajectory'] = wandb.Image(figures['val'])
+                plt.close(figures['val'])
+                print(f"  ✓ Logged validation trajectory embedding plot")
+
+            if log_dict:
+                log_dict['epoch'] = epoch
+                wandb.log(log_dict)
+
+        except Exception as e:
+            warnings.warn(f"Failed to create embedding plots: {e}")

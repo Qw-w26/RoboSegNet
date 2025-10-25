@@ -145,8 +145,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         '--dino-model',
         type=str,
-        default='dinov2_vitb14',
-        help='DINO model variant to use'
+        default='facebook/dinov3-vitl16-pretrain-lvd1689m',
+        help='DINO model variant to use (HuggingFace model name)'
     )
 
     parser.add_argument(

@@ -88,6 +88,8 @@ class ParquetTrajectory:
         intervals: List of Segment objects
         total_frames: Total number of frames in trajectory
         fps: Frames per second
+        dino_features: Pre-extracted DINO features (if available)
+        image_paths: Paths to extracted frame images (if available)
         metadata: Additional metadata dictionary
     """
 
@@ -106,9 +108,13 @@ class ParquetTrajectory:
         # Parse video paths from JSON string to dict
         video_paths_str = parquet_row['video_paths']
         if isinstance(video_paths_str, str):
-            self.videos_paths = ast.literal_eval(video_paths_str)
+            # Handle empty strings
+            if video_paths_str and video_paths_str.strip():
+                self.videos_paths = ast.literal_eval(video_paths_str)
+            else:
+                self.videos_paths = {}
         else:
-            self.videos_paths = video_paths_str
+            self.videos_paths = video_paths_str if video_paths_str else {}
 
         # Process proprioception data
         proprio_array = parquet_row['proprioception']
@@ -143,6 +149,10 @@ class ParquetTrajectory:
         self.total_frames = int(parquet_row['total_frames'])
         self.fps = float(parquet_row['fps'])
         self.metadata = parquet_row.get('metadata', {})
+
+        # Pre-extracted features (if available from prepare_data.py)
+        self.dino_features = parquet_row.get('dino_features', None)
+        self.image_paths = parquet_row.get('image_paths', None)
 
     def __repr__(self) -> str:
         return (f"ParquetTrajectory(trajectory_id='{self.trajectory_id}', "

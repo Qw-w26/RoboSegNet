@@ -117,6 +117,10 @@ class Trainer:
         Returns:
             Dictionary of training history (losses, metrics)
         """
+        # Store data loaders for callback access
+        self.train_loader = train_loader
+        self.val_loader = val_loader
+
         # Initialize history
         history = {
             'train_loss': [],

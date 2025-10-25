@@ -14,7 +14,8 @@ from .callbacks import (
     CheckpointCallback,
     EarlyStoppingCallback,
     TensorBoardCallback,
-    LearningRateSchedulerCallback
+    LearningRateSchedulerCallback,
+    EmbeddingVisualizationCallback
 )
 # Legacy config moved to config/config_schema.py
 # Import from there instead:
@@ -49,6 +50,7 @@ __all__ = [
     'EarlyStoppingCallback',
     'TensorBoardCallback',
     'LearningRateSchedulerCallback',
+    'EmbeddingVisualizationCallback',
 
     # Configuration (moved to config/ module)
     # Use: from config import TrainingConfig, WandBConfig, DataConfig

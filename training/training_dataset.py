@@ -1,17 +1,16 @@
-"""Training dataset for boundary prediction with feature caching.
+"""Training dataset for boundary prediction with pre-extracted features.
 
 This module provides a PyTorch Dataset that:
-- Extracts DINO visual features with Ray parallelization
+- Loads pre-extracted DINO visual features from parquet files
 - Tokenizes proprioceptive actions with Fast-DROID
 - Applies label smoothing to boundary annotations
-- Caches features for fast reloading
 - Creates sliding windows for temporal context
 
 Example:
     >>> from training import TrainingDatasetConfig, BoundaryDataset
     >>> from data import load_parquet_split
     >>>
-    >>> # Load data split from parquet
+    >>> # Load data split from parquet (must contain pre-extracted DINO features)
     >>> trajectories = load_parquet_split('train', splits_dir='./splits')
     >>>
     >>> # Create dataset
@@ -26,18 +25,12 @@ Example:
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-import warnings
-import hashlib
-import json
-import pickle
 
 import torch
 from torch.utils.data import Dataset
 from tqdm import tqdm
 import numpy as np
-import ray
 
-from features.dino_extractor import DinoFeatureExtractor, RayDinoFeatureExtractor
 from features.droid_extractor import DroidTokenEmbedder, FastTokenizerConfig
 from training.label_smoothing import GaussianSmoother, create_smoother
 
@@ -64,22 +57,19 @@ class TrainingDatasetConfig:
         window_size: Window size for boundary prediction (in frames)
         stride: Stride for window sampling (in frames)
         vocab_size: Tokenizer vocabulary size
-        num_workers: Number of Ray workers for parallel DINO extraction
-        device: Device for feature extraction ('cuda' or 'cpu')
-        ray_worker_device: Device for Ray workers (defaults to device)
-        cache_path: Path to cache directory for features (None to disable)
+        action_dim: Action dimension for tokenizer
+        device: Device for tokenization ('cuda' or 'cpu')
         label_smoother_type: Type of label smoother ('gaussian', 'triangular', etc.)
         label_smoother_sigma: Sigma parameter for Gaussian smoother
         label_smoother_peak_value: Peak value for smoother
-        action_dim: Action dimension for tokenizer
         max_samples: Maximum number of samples to load (None for all)
+        fps: Target FPS for data (should match preprocessing)
 
     Example:
         >>> config = TrainingDatasetConfig(
         ...     window_size=180,
         ...     stride=10,
-        ...     vocab_size=2048,
-        ...     cache_path='./cache'
+        ...     vocab_size=2048
         ... )
     """
 
@@ -90,15 +80,8 @@ class TrainingDatasetConfig:
     # Vocabulary and tokenization
     vocab_size: int = 2048
     action_dim: int = 14
-    fps: float = 5.0  # Target FPS for data (should match preprocessing)
-
-    # Parallel processing
-    num_workers: int = 4
     device: str = 'cuda'
-    ray_worker_device: Optional[str] = None
-
-    # Caching
-    cache_path: Optional[str] = None
+    fps: float = 5.0  # Target FPS for data (should match preprocessing)
 
     # Label smoothing
     label_smoother_type: str = 'gaussian'
@@ -107,11 +90,6 @@ class TrainingDatasetConfig:
 
     # Data limits
     max_samples: Optional[int] = None
-
-    def __post_init__(self):
-        """Set default values."""
-        if self.ray_worker_device is None:
-            self.ray_worker_device = self.device
 
 
 class BoundaryDataset(Dataset):
@@ -150,8 +128,6 @@ class BoundaryDataset(Dataset):
             )
         )
 
-        self.dino_embedder = DinoFeatureExtractor(device=config.device)
-
         # Initialize label smoother
         self.label_smoother = create_smoother(
             config.label_smoother_type,
@@ -159,21 +135,8 @@ class BoundaryDataset(Dataset):
             peak_value=config.label_smoother_peak_value
         )
 
-        # Initialize cache directories if caching is enabled
-        if config.cache_path:
-            self.dino_cache_dir = Path(config.cache_path) / "dino_features"
-            self.proprio_cache_dir = Path(config.cache_path) / "proprio_features"
-            self.dino_cache_dir.mkdir(parents=True, exist_ok=True)
-            # Disable proprio cache for now (same as andrew's code)
-            # self.proprio_cache_dir.mkdir(parents=True, exist_ok=True)
-        else:
-            self.dino_cache_dir = None
-            self.proprio_cache_dir = None
-
-        # Initialize Ray and process trajectories
-        self._initialize_ray()
+        # Process trajectories (load pre-extracted features from parquet)
         self._process_all_trajectories()
-        self._cleanup_ray()
 
     def __len__(self) -> int:
         """Get dataset size."""
@@ -183,57 +146,16 @@ class BoundaryDataset(Dataset):
         """Get a single sample."""
         return self.data_points[index]
 
-    def _initialize_ray(self) -> None:
-        """Initialize Ray for parallel DINO extraction."""
-        if not ray.is_initialized():
-            ray.init(ignore_reinit_error=True)
-
-        # Create Ray actors for DINO extraction
-        self.dino_actors = [
-            RayDinoFeatureExtractor.remote(device=self.config.ray_worker_device)
-            for _ in range(self.config.num_workers)
-        ]
-
-        print(f"Initialized {self.config.num_workers} Ray workers for DINO extraction")
-
-    def _cleanup_ray(self) -> None:
-        """Cleanup Ray actors and free GPU memory."""
-        try:
-            # Kill Ray actors
-            for actor in self.dino_actors:
-                try:
-                    ray.kill(actor)
-                except Exception:
-                    pass
-
-            # Shutdown Ray (skip if corrupted installation)
-            if ray.is_initialized():
-                try:
-                    ray.shutdown()
-                except (SyntaxError, ImportError):
-                    # Ray installation is corrupted, skip shutdown
-                    # Ray will cleanup on process exit
-                    pass
-        except Exception:
-            # If cleanup fails, continue anyway
-            pass
-
-        # Free GPU memory
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            torch.cuda.synchronize()
 
     def _process_all_trajectories(self) -> None:
-        """Process all trajectories with Ray parallelization and caching."""
-        # Storage for DINO features
-        self.dino_futures = {}
+        """Process all trajectories loading pre-extracted features from parquet."""
+        # Storage for pre-extracted DINO features
         self.dino_features = {}
 
-        # Phase 1: Submit DINO extraction tasks (with caching)
-        print("Phase 1: Submitting DINO extraction tasks...")
+        print("Loading pre-extracted features and assembling windows...")
         num_datapoints = 0
 
-        for i, traj in enumerate(tqdm(self.trajectories, desc="Assigning DINO tasks")):
+        for traj in tqdm(self.trajectories, desc="Processing trajectories"):
             # Check if we've hit max samples
             if self.config.max_samples and num_datapoints >= self.config.max_samples:
                 break
@@ -241,73 +163,38 @@ class BoundaryDataset(Dataset):
             # Get trajectory metadata
             task_id, episode_id, video_path, proprio_data, intervals = self._parse_trajectory(traj)
 
-            # Count datapoints this trajectory will produce
-            windows = self._make_windows(len(proprio_data['timestamps']))
-            num_datapoints += len(windows)
+            # Load pre-extracted DINO features from parquet
+            if not hasattr(traj, 'dino_features') or traj.dino_features is None or len(traj.dino_features) == 0:
+                raise ValueError(
+                    f"Trajectory {task_id}/{episode_id} (trajectory_id: {traj.trajectory_id}) has no pre-extracted DINO features.\n"
+                    f"This usually means the video files were missing during data preparation.\n"
+                    f"Please regenerate the dataset with correct video paths:\n"
+                    f"  python scripts/prepare_data.py --data-dir <path> --task-ids {task_id} --extract-dino\n"
+                    f"\nMake sure the video files exist at the correct location before running prepare_data.py."
+                )
 
-            # Check cache for DINO features
-            if self._is_dino_cached(video_path, windows):
-                cached_features = self._load_dino_from_cache(video_path, windows)
-                if cached_features is not None:
-                    # Use cached features
-                    if task_id not in self.dino_features:
-                        self.dino_features[task_id] = {}
-                    self.dino_features[task_id][episode_id] = cached_features
-                    continue
+            # Store DINO features for this trajectory
+            if task_id not in self.dino_features:
+                self.dino_features[task_id] = {}
 
-            # Submit Ray task if not cached
-            if task_id not in self.dino_futures:
-                self.dino_futures[task_id] = {}
+            # DINO features are stored as an object array of (1024,) vectors
+            # Convert to dict indexed by frame for easier lookup
+            dino_array = traj.dino_features
+            if dino_array.dtype == object:
+                # Stack into 2D array (num_frames, 1024)
+                if len(dino_array) == 0:
+                    raise ValueError(
+                        f"Trajectory {task_id}/{episode_id} has empty DINO features array. "
+                        f"Please regenerate the dataset."
+                    )
+                dino_stacked = np.stack(dino_array)
+            else:
+                dino_stacked = dino_array
 
-            future = self._submit_dino_extraction(
-                video_path,
-                windows,
-                actor=self.dino_actors[i % self.config.num_workers]
-            )
-            self.dino_futures[task_id][episode_id] = future
-
-        print(f"Submitted tasks for ~{num_datapoints} datapoints")
-
-        # Phase 2: Collect DINO extraction results
-        print("Phase 2: Collecting DINO extraction results...")
-        num_datapoints = 0
-
-        for traj in tqdm(self.trajectories, desc="Waiting for DINO tasks"):
-            # Check if we've hit max samples
-            if self.config.max_samples and num_datapoints >= self.config.max_samples:
-                break
-
-            task_id, episode_id, video_path, proprio_data, intervals = self._parse_trajectory(traj)
-
-            windows = self._make_windows(len(proprio_data['timestamps']))
-            num_datapoints += len(windows)
-
-            # Skip if already cached
-            if task_id in self.dino_features and episode_id in self.dino_features[task_id]:
-                continue
-
-            # Wait for Ray result
-            if task_id in self.dino_futures and episode_id in self.dino_futures[task_id]:
-                future = self.dino_futures[task_id][episode_id]
-                dino_features = ray.get(future)
-
-                if task_id not in self.dino_features:
-                    self.dino_features[task_id] = {}
-                self.dino_features[task_id][episode_id] = dino_features
-
-                # Save to cache
-                self._save_dino_to_cache(video_path, windows, dino_features)
-
-        # Phase 3: Assemble windows with all features
-        print("Phase 3: Assembling windows with features...")
-        num_datapoints = 0
-
-        for traj in tqdm(self.trajectories, desc="Assembling windows"):
-            # Check if we've hit max samples
-            if self.config.max_samples and num_datapoints >= self.config.max_samples:
-                break
-
-            task_id, episode_id, video_path, proprio_data, intervals = self._parse_trajectory(traj)
+            # Store as dict: {frame_idx: feature_vector}
+            self.dino_features[task_id][episode_id] = {
+                i: dino_stacked[i] for i in range(len(dino_stacked))
+            }
 
             # Process trajectory into windows
             windows = self._preprocess_trajectory(
@@ -325,7 +212,7 @@ class BoundaryDataset(Dataset):
                 self.data_points = self.data_points[:self.config.max_samples]
                 break
 
-        print(f"Created dataset with {len(self.data_points)} samples")
+        print(f"✓ Created dataset with {len(self.data_points)} samples from {len(self.trajectories)} trajectories")
 
     def _parse_trajectory(self, traj: Any) -> Tuple[int, int, str, Dict, List]:
         """Parse trajectory data into standard format.
@@ -373,89 +260,6 @@ class BoundaryDataset(Dataset):
             )
         return windows
 
-    def _is_dino_cached(self, video_path: str, windows: List[Window]) -> bool:
-        """Check if DINO features are cached."""
-        if not self.dino_cache_dir or not video_path:
-            return False
-
-        if not Path(video_path).exists():
-            return False
-
-        cache_file = self._get_dino_cache_file(video_path, windows)
-        return cache_file.exists()
-
-    def _load_dino_from_cache(self, video_path: str, windows: List[Window]) -> Optional[Dict]:
-        """Load DINO features from cache."""
-        cache_file = self._get_dino_cache_file(video_path, windows)
-        return self._load_from_cache(cache_file)
-
-    def _save_dino_to_cache(
-        self,
-        video_path: str,
-        windows: List[Window],
-        features: Dict
-    ) -> None:
-        """Save DINO features to cache."""
-        if self.dino_cache_dir and video_path and Path(video_path).exists():
-            cache_file = self._get_dino_cache_file(video_path, windows)
-            self._save_to_cache(cache_file, features)
-
-    def _get_dino_cache_file(self, video_path: str, windows: List[Window]) -> Path:
-        """Get cache file path for DINO features."""
-        # Extract unique frame indices from windows
-        interest_frames = set()
-        for window in windows:
-            interest_frames.update([window.begin_frame, window.middle_frame, window.end_frame])
-
-        cache_key = self._get_dino_cache_key(video_path, sorted(list(interest_frames)))
-        return self.dino_cache_dir / f"{cache_key}.pkl"
-
-    def _get_dino_cache_key(self, video_path: str, frame_indices: List[int]) -> str:
-        """Generate cache key for DINO features."""
-        key_data = {
-            'video_path': str(video_path),
-            'frame_indices': sorted(frame_indices),
-            'window_size': self.config.window_size,
-            'stride': self.config.stride
-        }
-        key_string = json.dumps(key_data, sort_keys=True)
-        return hashlib.md5(key_string.encode()).hexdigest()
-
-    def _load_from_cache(self, cache_file: Path) -> Optional[Dict]:
-        """Load data from cache file."""
-        if cache_file.exists():
-            try:
-                with open(cache_file, 'rb') as f:
-                    return pickle.load(f)
-            except (pickle.PickleError, EOFError, FileNotFoundError):
-                cache_file.unlink(missing_ok=True)
-        return None
-
-    def _save_to_cache(self, cache_file: Path, data: Dict) -> None:
-        """Save data to cache file."""
-        try:
-            with open(cache_file, 'wb') as f:
-                pickle.dump(data, f)
-        except (OSError, IOError) as e:
-            warnings.warn(f"Could not save to cache {cache_file}: {e}")
-
-    def _submit_dino_extraction(
-        self,
-        video_path: str,
-        windows: List[Window],
-        actor: Any
-    ) -> Any:
-        """Submit DINO extraction task to Ray actor."""
-        # Extract unique frame indices
-        interest_frames = set()
-        for window in windows:
-            interest_frames.update([window.begin_frame, window.middle_frame, window.end_frame])
-
-        interest_frames = sorted(list(interest_frames))
-
-        # Submit task
-        return actor.extract_batch.remote(video_path, interest_frames)
-
     def _preprocess_trajectory(
         self,
         task_id: int,
@@ -469,6 +273,12 @@ class BoundaryDataset(Dataset):
 
         # Get DINO features
         dino_features = self.dino_features.get(task_id, {}).get(episode_id, {})
+
+        # Detect DINO feature dimension from first available feature
+        dino_dim = 1024  # Default to DINOv3
+        if dino_features:
+            first_feature = next(iter(dino_features.values()))
+            dino_dim = len(first_feature)
 
         # Extract proprio features
         proprio_features = self._extract_proprio_features(proprio_data, windows)
@@ -484,9 +294,9 @@ class BoundaryDataset(Dataset):
                 'task_id': task_id,
                 'window': window,
                 'dino_features': {
-                    'begin_frame': torch.tensor(dino_features.get(window.begin_frame, np.zeros(384)), dtype=torch.float32),
-                    'middle_frame': torch.tensor(dino_features.get(window.middle_frame, np.zeros(384)), dtype=torch.float32),
-                    'end_frame': torch.tensor(dino_features.get(window.end_frame, np.zeros(384)), dtype=torch.float32),
+                    'begin_frame': torch.tensor(dino_features.get(window.begin_frame, np.zeros(dino_dim)), dtype=torch.float32),
+                    'middle_frame': torch.tensor(dino_features.get(window.middle_frame, np.zeros(dino_dim)), dtype=torch.float32),
+                    'end_frame': torch.tensor(dino_features.get(window.end_frame, np.zeros(dino_dim)), dtype=torch.float32),
                 },
                 'proprio_features': torch.tensor(proprio_features[window.begin_frame], dtype=torch.long),
                 'train_labels': torch.tensor(train_labels[window.begin_frame], dtype=torch.float32),
