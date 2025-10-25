@@ -36,6 +36,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from data.splits import DatasetSplitter, SplitConfig, SplitManifest
 from data.agibot_dataset import AgiBotWorldDataset, download_agibot_dataset
+from data.dataset_builder import DatasetBuilder
 from utils.reproducibility import set_all_seeds
 
 
@@ -119,25 +120,47 @@ def parse_args() -> argparse.Namespace:
         help='Name for the split (auto-generated if not specified)'
     )
 
-    # Feature extraction (optional)
+    # Feature extraction and dataset building
     parser.add_argument(
         '--extract-dino',
         action='store_true',
-        help='Pre-extract DINO features (slow but speeds up training)'
+        default=True,
+        help='Extract DINO features from videos'
     )
 
     parser.add_argument(
-        '--cache-dir',
+        '--extract-frames',
+        default=True,
+        action='store_true',
+        help='Extract individual frames from videos'
+    )
+
+    parser.add_argument(
+        '--dino-model',
         type=str,
-        default='./cache',
-        help='Directory to cache extracted features'
+        default='dinov2_vitb14',
+        help='DINO model variant to use'
+    )
+
+    parser.add_argument(
+        '--target-fps',
+        type=float,
+        default=5.0,
+        help='Target FPS for frame/feature extraction'
+    )
+
+    parser.add_argument(
+        '--build-dataset',
+        action='store_true',
+        default=True,
+        help='Build comprehensive processed dataset'
     )
 
     parser.add_argument(
         '--num-workers',
         type=int,
-        default=4,
-        help='Number of parallel workers for feature extraction'
+        default=None,
+        help='Number of Ray workers for parallel processing (None = auto-detect)'
     )
 
     return parser.parse_args()
@@ -282,40 +305,78 @@ def create_splits(
     print_split_summary(manifest)
 
 
-def extract_features(
+def build_processed_datasets(
     trajectories: List,
-    cache_dir: Path,
-    num_workers: int = 4
+    train_indices: List[int],
+    val_indices: List[int],
+    test_indices: List[int],
+    output_dir: Path,
+    args: argparse.Namespace
 ) -> None:
-    """Pre-extract DINO features for faster training.
+    """Build comprehensive processed datasets for all splits.
 
     Args:
         trajectories: List of trajectory objects
-        cache_dir: Directory to cache features
-        num_workers: Number of parallel workers
+        train_indices: Training split indices
+        val_indices: Validation split indices
+        test_indices: Test split indices
+        output_dir: Output directory for processed datasets
+        args: Command line arguments
     """
-    print(f"\nPre-extracting DINO features...")
-    print(f"  Cache directory: {cache_dir}")
-    print(f"  Num workers: {num_workers}")
+    print(f"\n{'='*80}")
+    print("BUILDING COMPREHENSIVE DATASET")
+    print(f"{'='*80}")
 
-    # TODO: Implement feature pre-extraction
-    # This would use the BoundaryDataset to extract and cache features
-
-    from training.training_dataset import BoundaryDataset, TrainingDatasetConfig
-
-    config = TrainingDatasetConfig(
-        window_size=180,
-        stride=10,
-        num_workers=num_workers,
-        cache_path=str(cache_dir),
-        max_samples=None  # Extract for all samples
+    # Create dataset builder
+    dataset_dir = output_dir / 'processed_dataset'
+    builder = DatasetBuilder(
+        output_dir=dataset_dir,
+        extract_dino=args.extract_dino,
+        extract_frames=args.extract_frames,
+        dino_model=args.dino_model,
+        target_fps=args.target_fps,
+        num_workers=args.num_workers
     )
 
-    print("Creating dataset (this will extract and cache features)...")
-    dataset = BoundaryDataset(trajectories, config)
+    # Build datasets for each split
+    splits = {}
 
-    print(f"Successfully extracted features for {len(dataset)} samples")
-    print(f"Features cached in {cache_dir}")
+    print("\nProcessing train split...")
+    train_processed = builder.build_dataset(trajectories, 'train', train_indices)
+    splits['train'] = train_processed
+
+    print("\nProcessing validation split...")
+    val_processed = builder.build_dataset(trajectories, 'val', val_indices)
+    splits['val'] = val_processed
+
+    print("\nProcessing test split...")
+    test_processed = builder.build_dataset(trajectories, 'test', test_indices)
+    splits['test'] = test_processed
+
+    # Create HuggingFace dataset if requested
+    builder.create_huggingface_dataset(splits)
+
+    print(f"\n{'='*80}")
+    print("DATASET BUILD COMPLETE")
+    print(f"{'='*80}")
+    print(f"\nProcessed datasets saved to: {dataset_dir}")
+    print(f"\nDataset statistics:")
+    print(f"  Train: {len(train_processed)} trajectories")
+    print(f"  Val: {len(val_processed)} trajectories")
+    print(f"  Test: {len(test_processed)} trajectories")
+
+    # Print feature extraction info
+    if args.extract_dino:
+        print(f"\n  DINO features: Extracted ({args.dino_model})")
+    else:
+        print(f"\n  DINO features: Not extracted")
+
+    if args.extract_frames:
+        print(f"  Frames: Extracted at {args.target_fps} FPS")
+    else:
+        print(f"  Frames: Not extracted")
+
+    print(f"\nDatasets are ready for use in downstream modules!")
 
 
 def main():
@@ -342,14 +403,36 @@ def main():
         stratify_by_task=args.stratify_by_task
     )
 
-    # Create splits
+    # Create splits and get indices
     output_dir = Path(args.output_dir)
+
+    # Create splitter
+    splitter = DatasetSplitter(split_config)
+
+    # Get task IDs from trajectories
+    task_ids = []
+    for t in trajectories:
+        if hasattr(t, 'task_id'):
+            task_ids.append(t.task_id)
+        else:
+            task_ids.append(0)
+
+    # Split trajectories into indices
+    train_indices, val_indices, test_indices = splitter.split_trajectories(trajectories, task_ids)
+
+    # Save split manifests (keeping the old functionality)
     create_splits(trajectories, split_config, output_dir, args.split_name)
 
-    # Optionally extract features
-    if args.extract_dino:
-        cache_dir = Path(args.cache_dir)
-        extract_features(trajectories, cache_dir, args.num_workers)
+    # Build comprehensive processed datasets if requested
+    if args.build_dataset:
+        build_processed_datasets(
+            trajectories=trajectories,
+            train_indices=train_indices,
+            val_indices=val_indices,
+            test_indices=test_indices,
+            output_dir=output_dir,
+            args=args
+        )
 
     print("\n✓ Data preparation complete!")
 
