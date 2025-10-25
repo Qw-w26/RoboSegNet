@@ -6,6 +6,7 @@ experiment_name: task_357_baseline
 model:
   vocab_size: 2048
   token_embed_dim: 128
+  dino_feature_dim: 3072
   hidden_dims: [512, 256, 128]
   prediction_window_size: 18
   use_proprio: true
@@ -78,7 +79,7 @@ training:
   seed: 42
 
 wandb:
-  enabled: false
+  enabled: true
   project: task-segmentation
   name: task_357_baseline
   tags: [task_357, baseline]

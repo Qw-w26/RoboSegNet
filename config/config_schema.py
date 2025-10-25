@@ -24,6 +24,7 @@ class ModelConfig:
     Attributes:
         vocab_size: Tokenizer vocabulary size
         token_embed_dim: Dimension of token embeddings
+        dino_feature_dim: DINO feature dimension (3 frames * 1024 = 3072)
         hidden_dims: List of hidden layer dimensions for MLP
         prediction_window_size: Number of frames to predict boundaries for
         use_proprio: Whether to use proprioceptive features
@@ -36,6 +37,7 @@ class ModelConfig:
     """
     vocab_size: int = 2048
     token_embed_dim: int = 128
+    dino_feature_dim: int = 3072  # 3 frames * 1024
     hidden_dims: List[int] = field(default_factory=lambda: [512, 256, 128])
     prediction_window_size: int = 18
 

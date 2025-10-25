@@ -198,13 +198,25 @@ class BoundaryDataset(Dataset):
 
     def _cleanup_ray(self) -> None:
         """Cleanup Ray actors and free GPU memory."""
-        # Kill Ray actors
-        for actor in self.dino_actors:
-            ray.kill(actor)
+        try:
+            # Kill Ray actors
+            for actor in self.dino_actors:
+                try:
+                    ray.kill(actor)
+                except Exception:
+                    pass
 
-        # Shutdown Ray
-        if ray.is_initialized():
-            ray.shutdown()
+            # Shutdown Ray (skip if corrupted installation)
+            if ray.is_initialized():
+                try:
+                    ray.shutdown()
+                except (SyntaxError, ImportError):
+                    # Ray installation is corrupted, skip shutdown
+                    # Ray will cleanup on process exit
+                    pass
+        except Exception:
+            # If cleanup fails, continue anyway
+            pass
 
         # Free GPU memory
         if torch.cuda.is_available():

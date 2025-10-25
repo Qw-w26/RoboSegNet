@@ -6,6 +6,7 @@ experiment_name: debug_run
 model:
   vocab_size: 512  # Smaller for speed
   token_embed_dim: 64
+  dino_feature_dim: 3072
   hidden_dims: [256, 128]
   prediction_window_size: 18
   use_proprio: true

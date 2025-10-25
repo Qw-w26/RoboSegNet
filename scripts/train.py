@@ -26,7 +26,11 @@ Date: October 25, 2025
 
 import argparse
 import sys
+import os
 from pathlib import Path
+
+# Disable tokenizers parallelism warning (before importing anything that uses tokenizers)
+os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
