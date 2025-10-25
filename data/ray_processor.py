@@ -33,13 +33,15 @@ class TrajectoryProcessor:
         extract_frames: bool = False,
         dino_model_name: str = 'dinov2_vitb14',
         target_fps: float = 5.0,
-        device: str = None
+        device: str = None,
+        frames_dir: str = None
     ):
         """Initialize the processor with optional DINO model."""
         self.extract_dino = extract_dino
         self.extract_frames = extract_frames
         self.target_fps = target_fps
         self.dino_model_name = dino_model_name
+        self.frames_dir = Path(frames_dir) if frames_dir else None
 
         # Set device
         if device is None:
@@ -94,20 +96,19 @@ class TrajectoryProcessor:
 
             # Extract visual features if video paths are provided
             dino_features = None
-            frames = None
+            image_paths = None
 
             if 'video_paths' in trajectory_data and trajectory_data['video_paths']:
-                # Use first available camera
+                # Use only head_color camera
                 video_paths = trajectory_data['video_paths']
-                if isinstance(video_paths, dict) and len(video_paths) > 0:
-                    camera_name = list(video_paths.keys())[0]
-                    video_path = Path(video_paths[camera_name])
+                if isinstance(video_paths, dict) and 'head_color' in video_paths:
+                    video_path = Path(video_paths['head_color'])
 
                     if video_path.exists():
                         if self.extract_dino:
                             dino_features = self._extract_dino_features(video_path)
                         if self.extract_frames:
-                            frames = self._extract_frames(video_path)
+                            image_paths = self._extract_and_save_frames(video_path, trajectory_id)
 
             # Create frame labels from segments
             frame_labels = self._create_frame_labels(trajectory_data.get('segments', []))
@@ -123,7 +124,7 @@ class TrajectoryProcessor:
                 'proprioception': proprio_data.tolist() if proprio_data is not None else None,
                 'proprio_timestamps': proprio_timestamps.tolist() if proprio_timestamps is not None else None,
                 'dino_features': dino_features.tolist() if dino_features is not None else None,
-                'images': frames,  # Will be list of numpy arrays or None
+                'image_paths': image_paths,  # List of relative path strings or None
                 'video_paths': trajectory_data.get('video_paths', {}),
                 'total_frames': trajectory_data.get('total_frames', 0),
                 'metadata': trajectory_data.get('metadata', {})
@@ -211,32 +212,53 @@ class TrajectoryProcessor:
             print(f"Warning: Could not extract DINO features from {video_path}: {e}")
             return None
 
-    def _extract_frames(self, video_path: Path) -> Optional[List[np.ndarray]]:
-        """Extract frames from video as numpy arrays using PyAV."""
+    def _extract_and_save_frames(self, video_path: Path, trajectory_id: str) -> Optional[List[str]]:
+        """Extract frames from video and save to disk, returning relative paths."""
+        if self.frames_dir is None:
+            print("Warning: frames_dir not set, cannot save frames")
+            return None
+            
         try:
+            from PIL import Image as PILImage
+            
             container = av.open(str(video_path))
             stream = container.streams.video[0]
 
             fps = float(stream.average_rate) if stream.average_rate else 30.0
             sample_rate = max(1, int(fps / self.target_fps))
 
-            frames = []
+            # Create trajectory-specific directory
+            traj_frames_dir = self.frames_dir / trajectory_id
+            traj_frames_dir.mkdir(parents=True, exist_ok=True)
+
+            image_paths = []
             frame_idx = 0
+            saved_idx = 0
 
             for frame in container.decode(stream):
                 if frame_idx % sample_rate == 0:
                     # Convert to RGB numpy array
-                    img = frame.to_ndarray(format='rgb24')
-                    frames.append(img)
+                    img_array = frame.to_ndarray(format='rgb24')
+                    
+                    # Save image as PNG
+                    img_path = traj_frames_dir / f"frame_{saved_idx:06d}.png"
+                    if not img_path.exists():
+                        pil_img = PILImage.fromarray(img_array)
+                        pil_img.save(img_path)
+                    
+                    # Store relative path from frames_dir
+                    rel_path = img_path.relative_to(self.frames_dir.parent)
+                    image_paths.append(str(rel_path))
+                    saved_idx += 1
 
                 frame_idx += 1
 
             container.close()
 
-            return frames if frames else None
+            return image_paths if image_paths else None
 
         except Exception as e:
-            print(f"Warning: Could not extract frames from {video_path}: {e}")
+            print(f"Warning: Could not extract and save frames from {video_path}: {e}")
             return None
 
 
@@ -274,7 +296,7 @@ def process_trajectory_batch(
                 'proprioception': None,
                 'proprio_timestamps': None,
                 'dino_features': None,
-                'images': None,
+                'image_paths': None,
                 'video_paths': traj_data.get('video_paths', {}),
                 'total_frames': traj_data.get('total_frames', 0),
                 'metadata': traj_data.get('metadata', {})
@@ -296,6 +318,7 @@ class RayDatasetBuilder:
         self,
         num_workers: int = None,
         num_gpus_per_worker: float = 0.25,
+        frames_dir: str = None,
         **processor_config
     ):
         """
@@ -304,11 +327,14 @@ class RayDatasetBuilder:
         Args:
             num_workers: Number of Ray workers (None = auto-detect)
             num_gpus_per_worker: GPUs allocated per worker
+            frames_dir: Directory to save extracted frames (required if extract_frames=True)
             **processor_config: Configuration passed to TrajectoryProcessor
         """
         self.num_workers = num_workers
         self.num_gpus_per_worker = num_gpus_per_worker
+        self.frames_dir = frames_dir
         self.processor_config = processor_config
+        self.processor_config['frames_dir'] = frames_dir
 
         # Initialize Ray if not already initialized
         if not ray.is_initialized():

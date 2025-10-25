@@ -69,6 +69,13 @@ def parse_args() -> argparse.Namespace:
         help='Task IDs to include in the dataset'
     )
 
+    parser.add_argument(
+        '--max-trajectories',
+        type=int,
+        default=None,
+        help='Maximum number of trajectories to use (None = use all)'
+    )
+
     # Split configuration
     parser.add_argument(
         '--train-ratio',
@@ -324,7 +331,7 @@ def build_processed_datasets(
         args: Command line arguments
     """
     print(f"\n{'='*80}")
-    print("BUILDING COMPREHENSIVE DATASET")
+    print("BUILDING COMPREHENSIVE DATASET (PARQUET FORMAT)")
     print(f"{'='*80}")
 
     # Create dataset builder
@@ -353,13 +360,12 @@ def build_processed_datasets(
     test_processed = builder.build_dataset(trajectories, 'test', test_indices)
     splits['test'] = test_processed
 
-    # Create HuggingFace dataset if requested
-    builder.create_huggingface_dataset(splits)
-
     print(f"\n{'='*80}")
     print("DATASET BUILD COMPLETE")
     print(f"{'='*80}")
     print(f"\nProcessed datasets saved to: {dataset_dir}")
+    print(f"  Format: Parquet with relative paths")
+    print(f"  Images: PNG files in frames/ directory")
     print(f"\nDataset statistics:")
     print(f"  Train: {len(train_processed)} trajectories")
     print(f"  Val: {len(val_processed)} trajectories")
@@ -367,16 +373,19 @@ def build_processed_datasets(
 
     # Print feature extraction info
     if args.extract_dino:
-        print(f"\n  DINO features: Extracted ({args.dino_model})")
+        print(f"\n  DINO features: Extracted ({args.dino_model}, subsampled)")
     else:
         print(f"\n  DINO features: Not extracted")
 
     if args.extract_frames:
-        print(f"  Frames: Extracted at {args.target_fps} FPS")
+        print(f"  Frames: Extracted at {args.target_fps} FPS (subsampled)")
     else:
         print(f"  Frames: Not extracted")
 
     print(f"\nDatasets are ready for use in downstream modules!")
+    print(f"\nTo load a split:")
+    print(f"  df = pd.read_parquet('{dataset_dir}/train_processed.parquet')")
+    print(f"  # Images at: {dataset_dir}/frames/<trajectory_id>/frame_XXXXXX.png")
 
 
 def main():
@@ -393,6 +402,11 @@ def main():
     if len(trajectories) == 0:
         print("Error: No trajectories loaded!")
         sys.exit(1)
+
+    # Limit number of trajectories if requested
+    if args.max_trajectories is not None and args.max_trajectories < len(trajectories):
+        print(f"\nLimiting trajectories from {len(trajectories)} to {args.max_trajectories}")
+        trajectories = trajectories[:args.max_trajectories]
 
     # Create split configuration
     split_config = SplitConfig(
