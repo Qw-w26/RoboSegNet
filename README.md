@@ -1,260 +1,559 @@
-# Task Segmentation Framework
+# Task Segmentation for Robot Manipulation
 
-A comprehensive framework for task segmentation in robotics trajectories, featuring benchmarking tools and trainable models.
+**A unified framework for multi-modal task segmentation combining visual (DINOv3) and proprioceptive (Fast-DROID) features.**
 
-## Project Structure
+This codebase merges the best components from two task segmentation projects, providing:
+- Advanced multi-modal neural architecture
+- Ray-parallelized feature extraction
+- Comprehensive evaluation metrics (F1@IoU, temporal, confidence)
+- Proper train/val/test splitting
+- Production-ready code with extensive documentation
 
-```
-task_seg/
-├── data/                     # Data loading and dataset management
-│   ├── base_dataset.py      # Abstract dataset interface
-│   ├── agibot_dataset.py    # AgiBotWorld dataset loader
-│   └── agibot_hf_direct.py  # HuggingFace direct loading
-│
-├── embedding/                # Feature extraction and embeddings
-│   └── fast_droid_embeddings.py  # Fast-DROID + DINOv3 embeddings
-│
-├── benchmark/                # Benchmarking framework
-│   ├── methods/             # Segmentation methods
-│   │   ├── base_method.py   # Base method interface
-│   │   └── clustering_methods.py  # Clustering-based methods
-│   ├── metrics/             # Evaluation metrics
-│   │   └── segmentation_metrics.py
-│   └── benchmark_runner.py  # Main benchmark runner
-│
-├── model/                    # Model architectures
-│   └── boundary_prediction.py  # MLP for boundary prediction
-│
-├── training/                 # Training utilities
-│   ├── dataset_generator.py # Training dataset generation
-│   ├── train.py            # Training script
-│   └── README.md           # Training documentation
-│
-└── examples/                 # Example scripts
-    ├── train_boundary_model.py
-    └── run_with_real_agibot.py
-```
+---
 
-## Installation
+## 📋 Table of Contents
+
+- [Features](#features)
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [Architecture](#architecture)
+- [Usage](#usage)
+- [Configuration](#configuration)
+- [Documentation](#documentation)
+- [Citation](#citation)
+
+---
+
+## ✨ Features
+
+### Multi-Modal Learning
+- **Visual Features**: DINOv3-ViT-L16 vision transformer (1024-dim per frame)
+- **Proprioceptive Features**: Fast-DROID tokenization of joint trajectories
+- **Fusion**: Transformer-based proprioception encoder + per-frame DINO encoder
+
+### Efficient Processing
+- **Ray Parallelization**: Multi-GPU feature extraction with 4 workers
+- **Feature Caching**: MD5-based caching for preprocessed features
+- **Batch Processing**: Efficient batch DINO extraction (256 frames/batch)
+
+### Robust Training
+- **Callback System**: WandB logging, checkpointing, early stopping, TensorBoard
+- **Loss Functions**: Focal Loss, Soft Focal Loss, BCE variants, Weighted BCE
+- **Label Smoothing**: Gaussian, Triangular, Uniform, Exponential smoothers
+- **Trainer Classes**: Modular `Trainer` and `BoundaryTrainer` with extensible hooks
+- **Feature Caching**: Automatic caching of DINO features for instant re-runs
+- **Scripts**: Complete CLI scripts for data prep, training, evaluation, inference
+
+### Comprehensive Evaluation
+- **Frame-level**: Accuracy, precision, recall, F1
+- **Segment-level**: F1@IoU with Hungarian algorithm matching
+- **Temporal**: Boundary detection error, tolerance-based metrics
+- **Confidence**: AUC-ROC, AUC-PR, optimal threshold finding
+
+### Production-Ready
+- **Type Hints**: Full type annotations throughout
+- **Documentation**: Comprehensive docstrings with examples
+- **Testing**: Unit tests for all modules (target: >80% coverage)
+- **Reproducibility**: Seed management, experiment state saving
+- **Modular**: Clean separation of concerns, easy to extend
+
+---
+
+## 📦 Installation
+
+### Requirements
+- Python 3.10+
+- PyTorch 2.0+
+- CUDA 11.8+ (for GPU support)
+- 32GB+ RAM recommended
+- 4+ GPUs recommended for parallel feature extraction
+
+### Install from Source
 
 ```bash
-# Clone the repository
-git clone <repository-url>
+# Clone repository
+git clone https://github.com/your-org/task_seg.git
 cd task_seg
+
+# Create virtual environment
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
 
 # Install dependencies
 pip install -r requirements.txt
 
-# For DINO visual features
-pip install transformers opencv-python
-
-# For Fast-DROID tokenization
-# (Fast-DROID tokenizer will be loaded from HuggingFace)
+# Install in development mode
+pip install -e .
 ```
 
-## Quick Start
+### Dependencies
 
-### 1. Loading Data
-
-```python
-from data import AgiBotWorldDataset
-from pathlib import Path
-
-# Load AgiBotWorld dataset
-dataset = AgiBotWorldDataset(
-    data_root=Path("./agibot_full_data/extracted"),
-    task_ids=[327],  # Optional: filter by task
-    max_trajectories=50
-)
-
-# Print statistics
-dataset.print_statistics()
-
-# Access trajectories
-for traj in dataset.trajectories:
-    print(f"Trajectory {traj.trajectory_id}: {traj.num_segments} segments")
+Core dependencies:
+```
+torch>=2.0.0
+transformers>=4.30.0
+ray>=2.5.0
+av  # PyAV for video processing
+numpy
+Pillow
+scikit-learn
+scipy  # For Hungarian algorithm
+h5py  # For proprioception data
+tqdm
 ```
 
-### 2. Generating Embeddings
-
-```python
-from embedding import create_embedding_function
-
-# Create embedding function
-embedding_fn = create_embedding_function(
-    window_size=15,
-    stride=1,
-    use_dino=True,
-    max_token_length=600
-)
-
-# Generate embeddings for a trajectory
-trajectory = dataset[0]
-embeddings = embedding_fn(trajectory)  # Shape: (n_windows, embedding_dim)
+Optional dependencies:
+```
+wandb  # For experiment tracking
+tensorboard  # For logging
+pytest  # For testing
+hydra-core  # For configuration (coming soon)
 ```
 
-### 3. Running Benchmarks
+---
 
-```python
-from benchmark import BenchmarkRunner
-from benchmark.methods import (
-    SpectralClusteringMethod,
-    ChangePointDetectionMethod
-)
+## 🚀 Quick Start
 
-# Define methods to benchmark
-methods = [
-    SpectralClusteringMethod(n_clusters=5, temporal_weight=0.3),
-    ChangePointDetectionMethod(penalty=3.0, max_segments=5)
-]
+### Complete Workflow (Using Scripts)
 
-# Create benchmark runner
-runner = BenchmarkRunner(
-    dataset=dataset,
-    methods=methods,
-    embedding_fn=embedding_fn,
-    output_dir=Path("./benchmark_results")
-)
+The easiest way to get started is using our command-line scripts:
 
-# Run benchmark
-results = runner.run_all_methods()
+```bash
+# 1. Prepare data splits
+python scripts/prepare_data.py \
+    --task-ids 327 \
+    --output-dir ./splits \
+    --extract-dino \
+    --cache-dir ./cache
 
-# Get best method
-best_method = runner.get_best_method(metric='macro_f1')
-print(f"Best method: {best_method}")
+# 2. Train model
+python scripts/train.py \
+    --train-split ./splits/task_327_train.json \
+    --val-split ./splits/task_327_val.json \
+    --wandb-project boundary-prediction \
+    --num-epochs 100 \
+    --early-stopping
+
+# 3. Evaluate on test set
+python scripts/evaluate.py \
+    --checkpoint ./checkpoints/best_model.pt \
+    --test-split ./splits/task_327_test.json \
+    --output-dir ./evaluation_results
+
+# 4. Run inference on new data
+python scripts/inference.py \
+    --checkpoint ./checkpoints/best_model.pt \
+    --video-path ./data/new_episode.mp4 \
+    --proprio-path ./data/new_episode_proprio.npy \
+    --output results.json \
+    --visualize
 ```
 
-### 4. Training Boundary Prediction Model
+### Programmatic Usage
+
+For more control, use the Python API:
+
+#### 1. Data Preparation
 
 ```python
-from data import AgiBotWorldDataset
-from training import SegmentBoundaryDataset, create_dataloaders, Trainer
-from model import create_model, FocalLoss
-import torch
+from data.splits import DatasetSplitter, SplitConfig
 
-# Load dataset
-dataset = AgiBotWorldDataset(
-    data_root=Path("./agibot_full_data/extracted"),
-    task_ids=[327],
-    max_trajectories=50
+# Create splits
+config = SplitConfig(
+    train_ratio=0.7,
+    val_ratio=0.15,
+    test_ratio=0.15,
+    seed=42,
+    stratify_by_task=True
 )
 
-# Generate training data
-train_dataset = SegmentBoundaryDataset(
-    dataset=dataset,
-    window_size=15,
-    boundary_tolerance=2
-)
+splitter = DatasetSplitter(config)
+train_split, val_split, test_split = splitter.split_trajectories(trajectories)
 
-# Create data loader
-train_loader, _ = create_dataloaders(train_dataset, batch_size=32)
+# Save splits
+splitter.save_split(train_split, './splits/train.json')
+splitter.save_split(val_split, './splits/val.json')
+splitter.save_split(test_split, './splits/test.json')
+```
+
+#### 2. Training
+
+```python
+from training import (
+    BoundaryDataset, TrainingDatasetConfig,
+    BoundaryTrainer, WandBCallback, CheckpointCallback
+)
+from models import create_model, ModelConfig
+import torch.optim as optim
+
+# Create dataset with caching
+config = TrainingDatasetConfig(
+    window_size=180,
+    stride=10,
+    vocab_size=2048,
+    cache_path='./cache'
+)
+train_dataset = BoundaryDataset(train_trajectories, config)
 
 # Create model
-model = create_model(device='cuda')
+model = create_model(ModelConfig(vocab_size=2048))
+optimizer = optim.Adam(model.parameters(), lr=3e-3)
+criterion = torch.nn.BCEWithLogitsLoss()
+
+# Train with callbacks
+callbacks = [
+    WandBCallback(project='boundary-prediction'),
+    CheckpointCallback(save_dir='./checkpoints')
+]
+
+trainer = BoundaryTrainer(
+    model=model,
+    optimizer=optimizer,
+    criterion=criterion,
+    callbacks=callbacks
+)
+
+history = trainer.fit(train_loader, val_loader, num_epochs=100)
+```
+
+#### 3. Evaluation
+
+```python
+from evaluation import ModelEvaluator, EvaluationConfig
+
+# Configure evaluation
+eval_config = EvaluationConfig(
+    iou_thresholds=[0.3, 0.5, 0.7],
+    save_visualizations=True
+)
+
+# Run evaluation
+evaluator = ModelEvaluator(model, eval_config)
+results = evaluator.evaluate(
+    test_loader,
+    save_dir='./evaluation_results',
+    visualize=True
+)
+
+print(f"F1@IoU(0.5): {results['f1_iou_0.5']['f1']:.3f}")
+print(f"AUC-ROC: {results['auc_roc']:.3f}")
+```
+
+---
+
+## 🏗️ Architecture
+
+### Model Architecture
+
+```
+┌─────────────────────┐      ┌─────────────────────┐
+│  Tokenized Actions  │      │   DINO Features     │
+│   (batch, seq_len)  │      │   (batch, 3×1024)   │
+└──────────┬──────────┘      └──────────┬──────────┘
+           │                            │
+           ▼                            ▼
+┌─────────────────────┐      ┌─────────────────────┐
+│  TinyFASTEncoder    │      │ DinoFeatureEncoder  │
+│  - Embedding        │      │ - L2 Normalize      │
+│  - Transformer      │      │ - Noise (train)     │
+│  - Mean Pooling     │      │ - Per-frame Linear  │
+│  → (batch, 128)     │      │ → (batch, 96)       │
+└──────────┬──────────┘      └──────────┬──────────┘
+           │                            │
+           └────────────┬───────────────┘
+                        ▼
+              ┌─────────────────┐
+              │   Concatenate   │
+              │  (batch, 224)   │
+              └────────┬─────────┘
+                       ▼
+              ┌─────────────────┐
+              │   MLP Stack     │
+              │  512 → 256 → 128│
+              │  + BatchNorm    │
+              │  + ReLU         │
+              │  + Dropout      │
+              └────────┬─────────┘
+                       ▼
+              ┌─────────────────┐
+              │   Output Layer  │
+              │  → (batch, 10)  │
+              └─────────────────┘
+                   Predictions
+```
+
+### Data Pipeline
+
+```
+1. Load Trajectories
+   ├─ HuggingFace Dataset
+   └─ Local Files (H5 + MP4)
+         │
+         ▼
+2. Create Splits
+   ├─ Train (70%)
+   ├─ Val (15%)
+   └─ Test (15%)
+         │
+         ▼
+3. Feature Extraction
+   ├─ DINO (Ray Parallel)
+   │  └─ 4 GPU workers
+   └─ DROID Tokenization
+         │
+         ▼
+4. Create Windows
+   ├─ Sliding Window (size=180, stride=10)
+   ├─ Label Smoothing (Gaussian)
+   └─ Cache Features
+         │
+         ▼
+5. Training
+   ├─ DataLoader (batch=512)
+   ├─ Model Forward
+   ├─ Loss Computation
+   └─ Optimization
+         │
+         ▼
+6. Evaluation
+   ├─ Frame Metrics
+   ├─ F1@IoU
+   ├─ Temporal Metrics
+   └─ Visualizations
+```
+
+---
+
+## 📚 Usage
+
+### Training with Custom Configuration
+
+```python
+from models import ModelConfig, create_model
+from training import Trainer, TrainingConfig
+from training.callbacks import WandBCallback, CheckpointCallback
+from data import create_dataloaders
+
+# Training configuration
+train_config = TrainingConfig(
+    num_epochs=100,
+    batch_size=512,
+    learning_rate=3e-3,
+    weight_decay=1e-4,
+    scheduler='cosine',
+    early_stopping_patience=10
+)
+
+# Create dataloaders
+train_loader, val_loader = create_dataloaders(
+    dataset_path='./preprocessed_data/task_327',
+    batch_size=train_config.batch_size,
+    num_workers=4
+)
+
+# Create model
+model_config = ModelConfig()
+model = create_model(model_config)
+
+# Callbacks
+callbacks = [
+    WandBCallback(project='task-segmentation', name='experiment-1'),
+    CheckpointCallback(save_dir='./checkpoints', monitor='val_f1'),
+]
 
 # Train
 trainer = Trainer(
     model=model,
     train_loader=train_loader,
-    criterion=FocalLoss(alpha=0.25, gamma=2.0)
+    val_loader=val_loader,
+    config=train_config,
+    callbacks=callbacks
 )
-trainer.train(num_epochs=30)
+
+trainer.train()
 ```
 
-Or use the example script:
+### Inference on New Data
+
+```python
+from models import BoundaryPredictionMLP
+from features import DinoFeatureExtractor, DroidTokenEmbedder
+from model.postprocessing import non_maximum_suppression
+
+# Load trained model
+model = torch.load('checkpoints/best_model.pt')
+model.eval()
+
+# Extract features
+dino_features = dino_extractor.extract_batch(video_path, frame_indices)
+droid_tokens = droid_embedder.embed_frames(proprio, frames, window_size)
+
+# Predict
+with torch.no_grad():
+    logits = model(tokens, None, dino)
+    probs = torch.sigmoid(logits)
+
+# Post-process
+boundaries = non_maximum_suppression(
+    probs.cpu().numpy(),
+    threshold=0.5,
+    min_distance=10
+)
+
+print(f"Detected {len(boundaries)} boundaries at frames: {boundaries}")
+```
+
+---
+
+## ⚙️ Configuration
+
+### Model Configuration
+
+```python
+from models import ModelConfig
+
+config = ModelConfig(
+    # Vocabulary
+    vocab_size=2048,              # Tokenizer vocabulary size
+    token_embed_dim=128,          # Token embedding dimension
+
+    # Features
+    dino_feature_dim=3072,        # 3 frames × 1024
+
+    # Architecture
+    hidden_dims=[512, 256, 128],  # MLP layers
+    prediction_window_size=10,    # Output window size
+
+    # Dropout
+    transformer_dropout=0.3,      # Transformer dropout
+    embedding_dropout=0.1,        # Embedding dropout
+    dino_encoder_dropout=0.3,     # DINO encoder dropout
+    mlp_dropout=0.3,              # MLP dropout
+
+    # Augmentation
+    feature_noise_std=0.05,       # Std for noise injection
+
+    # Modalities
+    use_proprio=True,             # Use proprioception
+    use_dino=True,                # Use visual features
+)
+```
+
+### Split Configuration
+
+```python
+from data.splits import SplitConfig
+
+config = SplitConfig(
+    train_ratio=0.7,              # 70% training
+    val_ratio=0.15,               # 15% validation
+    test_ratio=0.15,              # 15% testing
+    seed=42,                      # Random seed
+    stratify_by_task=True,        # Stratify by task ID
+    min_trajectories_per_task=3  # Minimum per split
+)
+```
+
+---
+
+## 📖 Documentation
+
+### Full Documentation
+
+- **[Merge Plan](docs/MERGE_PLAN.md)**: Comprehensive plan for codebase merge
+- **[Architecture Guide](docs/architecture.md)**: System architecture (coming soon)
+- **[Data Pipeline](docs/data_pipeline.md)**: Dataset preparation guide (coming soon)
+- **[Training Guide](docs/training_guide.md)**: Training walkthrough (coming soon)
+- **[Evaluation Guide](docs/evaluation_guide.md)**: Metrics explanation (coming soon)
+- **[API Reference](docs/api_reference/)**: Auto-generated docs (coming soon)
+
+### Module Documentation
+
+All modules have comprehensive docstrings with examples:
+
+```python
+from models import BoundaryPredictionMLP
+help(BoundaryPredictionMLP)  # Full documentation
+```
+
+---
+
+## 🧪 Testing
+
+Run tests with pytest:
 
 ```bash
-python examples/train_boundary_model.py
+# Run all tests
+pytest tests/ -v
+
+# Run with coverage
+pytest tests/ --cov=. --cov-report=html
+
+# Run specific test module
+pytest tests/test_models/test_boundary_prediction.py -v
 ```
 
-## Command Line Interface
+---
 
-### Training Script
+## 🤝 Contributing
+
+We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+
+### Development Setup
 
 ```bash
-python training/train.py \
-  --data_root ./agibot_full_data/extracted \
-  --task_ids 327 \
-  --max_trajectories 50 \
-  --batch_size 32 \
-  --num_epochs 30 \
-  --use_focal_loss \
-  --output_dir ./training_output
+# Install development dependencies
+pip install -r requirements-dev.txt
+
+# Install pre-commit hooks
+pre-commit install
+
+# Run linting
+black .
+flake8 .
+mypy .
 ```
 
-View training progress:
-```bash
-tensorboard --logdir ./training_output/logs
-```
+---
 
-## Modules
+## 📝 Citation
 
-### Data (`data/`)
-- **AgiBotWorldDataset**: Loads and manages AgiBotWorld trajectories with segmentation annotations
-- **TrajectoryData**: Represents a single trajectory with segments
-- **SegmentAnnotation**: Represents a segment with start/end frames and action text
-
-### Embedding (`embedding/`)
-- **FastDROIDEmbedder**: Combines Fast-DROID tokenization and DINOv3 visual features
-- Supports sliding windows over trajectories
-- Handles proprioception from H5 files and videos
-
-### Benchmark (`benchmark/`)
-- **BenchmarkRunner**: Unified interface for evaluating segmentation methods
-- **Methods**: Various segmentation approaches (clustering, change point detection, etc.)
-- **Metrics**: Comprehensive evaluation (accuracy, F1, boundary detection, etc.)
-
-### Model (`model/`)
-- **BoundaryPredictionMLP**: Neural network for predicting segment boundaries
-- Combines frozen DINO features, tokenized actions, and statistical features
-- **FocalLoss**: Loss function for handling class imbalance
-
-### Training (`training/`)
-- **SegmentBoundaryDataset**: PyTorch dataset for boundary prediction
-- **Trainer**: Training loop with checkpointing and logging
-- See `training/README.md` for detailed documentation
-
-## Features
-
-- **Multi-modal Features**: Combines visual (DINO), proprioceptive (Fast-DROID), and statistical features
-- **Flexible Benchmarking**: Easy to add new segmentation methods
-- **Comprehensive Metrics**: Frame-level, boundary detection, and clustering metrics
-- **Training Framework**: Complete pipeline for training boundary prediction models
-- **Visualization**: TensorBoard integration for training monitoring
-
-## Requirements
-
-- Python >= 3.8
-- PyTorch >= 1.10
-- transformers (for Fast-DROID and DINO)
-- opencv-python (for video processing)
-- h5py (for proprioception data)
-- scikit-learn (for metrics and clustering)
-- ruptures (for change point detection)
-- tqdm (for progress bars)
-- tensorboard (for training visualization)
-
-## Citation
-
-If you use this framework in your research, please cite:
+If you use this code in your research, please cite:
 
 ```bibtex
-@software{task_segmentation_framework,
-  title = {Task Segmentation Framework},
-  author = {Your Name},
-  year = {2024},
-  url = {https://github.com/your-repo/task_seg}
+@software{task_segmentation_2025,
+  title={Task Segmentation for Robot Manipulation},
+  author={Your Team},
+  year={2025},
+  url={https://github.com/your-org/task_seg}
 }
 ```
 
-## License
+---
 
-[Your License Here]
+## 📄 License
 
-## Contributing
+This project is licensed under the MIT License - see [LICENSE](LICENSE) for details.
 
-Contributions are welcome! Please see CONTRIBUTING.md for guidelines.
+---
 
-## Contact
+## 🙏 Acknowledgments
 
-For questions or issues, please open an issue on GitHub or contact [your email].
+- **DINOv3**: Meta AI's vision transformer
+- **Fast-DROID**: Physical Intelligence's proprioceptive tokenizer
+- **AgiBotWorld**: Dataset and annotations
+- **Ray**: Distributed computing framework
+
+---
+
+## 📧 Contact
+
+For questions or issues:
+- Open an issue on GitHub
+- Contact: your-email@example.com
+
+---
+
+**Status**: 🚧 Active Development
+
+**Latest Version**: 0.1.0 (October 2025)
