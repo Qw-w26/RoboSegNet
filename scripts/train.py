@@ -296,7 +296,8 @@ def main():
         callbacks=callbacks,
         scheduler=scheduler,
         prediction_stride=config.data.stride,
-        prediction_window_size=config.model.prediction_window_size
+        prediction_window_size=config.model.prediction_window_size,
+        classification_threshold=config.training.classification_threshold
     )
 
     # Train

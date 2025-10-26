@@ -44,7 +44,7 @@ data:
 
 training:
   num_epochs: 100
-  learning_rate: 0.003
+  learning_rate: 0.0005
   weight_decay: 0.0001
   optimizer: adam
 
@@ -55,6 +55,9 @@ training:
   # Loss
   loss_type: bce
   loss_pos_weight: 10.0
+
+  # Metrics
+  classification_threshold: 0.3  # Threshold for binary classification (probability > threshold = boundary)
 
   # Regularization
   gradient_clip_val: null

@@ -125,7 +125,11 @@ class Trainer:
         history = {
             'train_loss': [],
             'val_loss': [],
-            'learning_rate': []
+            'learning_rate': [],
+            'train_accuracy': [],
+            'train_f1': [],
+            'val_accuracy': [],
+            'val_f1': []
         }
 
         # Callback: on_train_begin
@@ -149,22 +153,34 @@ class Trainer:
             should_collect_plots = (epoch + 1) % collect_plots_every == 0
 
             # Train
-            train_loss, train_trajectory_data = self._train_epoch(
+            train_results = self._train_epoch(
                 train_loader,
                 log_every=log_every,
                 collect_trajectory_data=should_collect_plots
             )
+            train_loss = train_results['loss']
+            train_trajectory_data = train_results.get('trajectory_data', [])
             history['train_loss'].append(train_loss)
+            history['train_accuracy'].append(train_results.get('accuracy', 0.0))
+            history['train_f1'].append(train_results.get('f1_score', 0.0))
 
             # Validate
             val_loss = None
             val_trajectory_data = []
+            val_accuracy = 0.0
+            val_f1 = 0.0
             if val_loader is not None:
-                val_loss, val_trajectory_data = self._validate_epoch(
+                val_results = self._validate_epoch(
                     val_loader,
                     collect_trajectory_data=should_collect_plots
                 )
+                val_loss = val_results['loss']
+                val_trajectory_data = val_results.get('trajectory_data', [])
+                val_accuracy = val_results.get('accuracy', 0.0)
+                val_f1 = val_results.get('f1_score', 0.0)
                 history['val_loss'].append(val_loss)
+                history['val_accuracy'].append(val_accuracy)
+                history['val_f1'].append(val_f1)
 
             # Get current learning rate
             current_lr = self.optimizer.param_groups[0]['lr']
@@ -173,7 +189,11 @@ class Trainer:
             # Prepare logs for callbacks
             logs = {
                 'train_loss': train_loss,
+                'train_accuracy': train_results.get('accuracy', 0.0),
+                'train_f1': train_results.get('f1_score', 0.0),
                 'val_loss': val_loss,
+                'val_accuracy': val_accuracy,
+                'val_f1': val_f1,
                 'learning_rate': current_lr,
                 'epoch': epoch
             }
@@ -184,10 +204,10 @@ class Trainer:
                 logs['val_trajectory_data'] = val_trajectory_data
 
             # Print epoch summary
-            print(f"Train Loss: {train_loss:.4f}", end='')
+            print(f"Train Loss: {train_loss:.4f}, Acc: {train_results.get('accuracy', 0.0):.4f}, F1: {train_results.get('f1_score', 0.0):.4f}", end='')
             if val_loss is not None:
-                print(f", Val Loss: {val_loss:.4f}", end='')
-            print(f", LR: {current_lr:.6f}")
+                print(f" | Val Loss: {val_loss:.4f}, Acc: {val_accuracy:.4f}, F1: {val_f1:.4f}", end='')
+            print(f" | LR: {current_lr:.6f}")
 
             # Callback: on_epoch_end
             for callback in self.callbacks:
@@ -215,11 +235,11 @@ class Trainer:
         train_loader: DataLoader,
         log_every: int = 10,
         collect_trajectory_data: bool = False
-    ) -> tuple:
+    ) -> Dict[str, Any]:
         """Train for one epoch.
 
         Returns:
-            Tuple of (average_loss, trajectory_data)
+            Dictionary with 'loss', 'trajectory_data', and optional metrics
         """
         self.model.train()
         total_loss = 0.0
@@ -264,17 +284,21 @@ class Trainer:
                 callback.on_batch_end(self, batch_idx, batch_logs)
 
         avg_loss = total_loss / len(train_loader)
-        return avg_loss, trajectory_data
+
+        return {
+            'loss': avg_loss,
+            'trajectory_data': trajectory_data
+        }
 
     def _validate_epoch(
         self,
         val_loader: DataLoader,
         collect_trajectory_data: bool = False
-    ) -> tuple:
+    ) -> Dict[str, Any]:
         """Validate for one epoch.
 
         Returns:
-            Tuple of (average_loss, trajectory_data)
+            Dictionary with 'loss', 'trajectory_data', and optional metrics
         """
         # Callback: on_validation_begin
         for callback in self.callbacks:
@@ -305,7 +329,10 @@ class Trainer:
         for callback in self.callbacks:
             callback.on_validation_end(self, val_logs)
 
-        return avg_loss, trajectory_data
+        return {
+            'loss': avg_loss,
+            'trajectory_data': trajectory_data
+        }
 
     def _train_step(
         self,
@@ -396,7 +423,8 @@ class BoundaryTrainer(Trainer):
         gradient_clip_val: Optional[float] = None,
         prediction_stride: int = 10,
         prediction_window_size: int = 18,
-        crop_labels_fn: Optional[Callable] = None
+        crop_labels_fn: Optional[Callable] = None,
+        classification_threshold: float = 0.5
     ):
         super().__init__(
             model=model,
@@ -410,6 +438,267 @@ class BoundaryTrainer(Trainer):
         self.prediction_stride = prediction_stride
         self.prediction_window_size = prediction_window_size
         self.crop_labels_fn = crop_labels_fn or self._default_crop_labels
+        self.classification_threshold = classification_threshold
+
+        print(f"Classification threshold: {self.classification_threshold}")
+
+    def _train_epoch(
+        self,
+        train_loader: DataLoader,
+        log_every: int = 10,
+        collect_trajectory_data: bool = False
+    ) -> Dict[str, Any]:
+        """Train for one epoch with metric computation.
+
+        Returns:
+            Dictionary with 'loss', 'accuracy', 'f1_score', 'trajectory_data'
+        """
+        self.model.train()
+        total_loss = 0.0
+        trajectory_data = []
+
+        # Accumulate predictions and labels for metrics
+        all_predictions = []
+        all_labels = []
+
+        pbar = tqdm(train_loader, desc=f'Epoch {self.current_epoch+1}')
+        for batch_idx, batch in enumerate(pbar):
+            # Callback: on_batch_begin
+            for callback in self.callbacks:
+                callback.on_batch_begin(self, batch_idx)
+
+            # Forward pass
+            loss, batch_trajectory_data, predictions, labels = self._train_step_with_metrics(
+                batch, collect_trajectory_data
+            )
+
+            # Accumulate for metrics
+            all_predictions.append(predictions)
+            all_labels.append(labels)
+
+            # Backward pass
+            self.optimizer.zero_grad()
+            loss.backward()
+
+            # Gradient clipping
+            if self.gradient_clip_val is not None:
+                torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(),
+                    self.gradient_clip_val
+                )
+
+            self.optimizer.step()
+
+            # Track loss
+            total_loss += loss.item()
+
+            # Collect trajectory data if requested
+            if collect_trajectory_data:
+                trajectory_data.extend(batch_trajectory_data)
+
+            # Update progress bar
+            if (batch_idx + 1) % log_every == 0 or batch_idx == len(train_loader) - 1:
+                pbar.set_postfix({'Loss': f'{loss.item():.4f}'})
+
+            # Callback: on_batch_end
+            batch_logs = {'batch_loss': loss.item()}
+            for callback in self.callbacks:
+                callback.on_batch_end(self, batch_idx, batch_logs)
+
+        avg_loss = total_loss / len(train_loader)
+
+        # Compute metrics from accumulated predictions
+        metrics = self._compute_metrics(all_predictions, all_labels)
+
+        return {
+            'loss': avg_loss,
+            'accuracy': metrics['accuracy'],
+            'f1_score': metrics['f1_score'],
+            'trajectory_data': trajectory_data
+        }
+
+    def _validate_epoch(
+        self,
+        val_loader: DataLoader,
+        collect_trajectory_data: bool = False
+    ) -> Dict[str, Any]:
+        """Validate for one epoch with metric computation.
+
+        Returns:
+            Dictionary with 'loss', 'accuracy', 'f1_score', 'trajectory_data'
+        """
+        # Callback: on_validation_begin
+        for callback in self.callbacks:
+            callback.on_validation_begin(self)
+
+        self.model.eval()
+        total_loss = 0.0
+        trajectory_data = []
+
+        # Accumulate predictions and labels for metrics
+        all_predictions = []
+        all_labels = []
+
+        with torch.no_grad():
+            for batch in tqdm(val_loader, desc='Validation'):
+                # Forward pass only
+                loss, batch_trajectory_data, predictions, labels = self._validation_step_with_metrics(
+                    batch,
+                    collect_trajectory_data
+                )
+
+                # Accumulate for metrics
+                all_predictions.append(predictions)
+                all_labels.append(labels)
+
+                total_loss += loss.item()
+
+                # Collect trajectory data if requested
+                if collect_trajectory_data:
+                    trajectory_data.extend(batch_trajectory_data)
+
+        avg_loss = total_loss / len(val_loader)
+
+        # Compute metrics from accumulated predictions
+        metrics = self._compute_metrics(all_predictions, all_labels)
+
+        # Callback: on_validation_end
+        val_logs = {
+            'val_loss': avg_loss,
+            'val_accuracy': metrics['accuracy'],
+            'val_f1': metrics['f1_score']
+        }
+        for callback in self.callbacks:
+            callback.on_validation_end(self, val_logs)
+
+        return {
+            'loss': avg_loss,
+            'accuracy': metrics['accuracy'],
+            'f1_score': metrics['f1_score'],
+            'trajectory_data': trajectory_data
+        }
+
+    def _compute_metrics(
+        self,
+        all_predictions: List[np.ndarray],
+        all_labels: List[np.ndarray]
+    ) -> Dict[str, float]:
+        """Compute accuracy and F1 from accumulated predictions and labels using configurable threshold."""
+        # Concatenate all predictions and labels
+        predictions = np.concatenate(all_predictions, axis=0)
+        labels = np.concatenate(all_labels, axis=0)
+
+        # Ensure arrays have the same shape
+        if predictions.shape != labels.shape:
+            min_len = min(len(predictions), len(labels))
+            predictions = predictions[:min_len]
+            labels = labels[:min_len]
+
+        # Convert to binary using configurable threshold
+        binary_predictions = (predictions > self.classification_threshold).astype(int)
+        binary_ground_truth = (labels > 0.5).astype(int)
+
+        # Calculate confusion matrix elements
+        tp = np.sum((binary_predictions == 1) & (binary_ground_truth == 1))
+        fp = np.sum((binary_predictions == 1) & (binary_ground_truth == 0))
+        fn = np.sum((binary_predictions == 0) & (binary_ground_truth == 1))
+        tn = np.sum((binary_predictions == 0) & (binary_ground_truth == 0))
+
+        # Calculate metrics
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+        accuracy = (tp + tn) / (tp + fp + fn + tn) if (tp + fp + fn + tn) > 0 else 0.0
+
+        return {
+            'accuracy': float(accuracy),
+            'f1_score': float(f1),
+            'precision': float(precision),
+            'recall': float(recall)
+        }
+
+    def _train_step_with_metrics(
+        self,
+        batch: Dict[str, Any],
+        collect_trajectory_data: bool = False
+    ) -> tuple:
+        """Execute one training step and return predictions/labels for metrics.
+
+        Returns:
+            Tuple of (loss, trajectory_data, predictions, labels)
+        """
+        # Process batch normally
+        loss, trajectory_data = self._process_batch(batch, training=True, collect_trajectory_data=collect_trajectory_data)
+
+        # Extract predictions and labels for metrics
+        with torch.no_grad():
+            tokenized_actions = batch['proprio_features'].to(self.device)
+            dino_features = torch.cat([
+                batch['dino_features']['begin_frame'],
+                batch['dino_features']['middle_frame'],
+                batch['dino_features']['end_frame']
+            ], dim=1).to(self.device)
+            labels = batch['train_labels'].to(self.device)
+
+            # Crop labels to prediction window (same as in _process_batch)
+            labels = self.crop_labels_fn(
+                labels,
+                self.prediction_window_size,
+                self.prediction_stride
+            )
+            labels = labels[:, labels.shape[1] // 2 - self.prediction_window_size // 2:
+                              labels.shape[1] // 2 + self.prediction_window_size // 2]
+
+            # Get predictions
+            logits = self.model(tokenized_actions, None, dino_features)
+            probabilities = torch.sigmoid(logits)
+
+            # Convert to numpy for metrics
+            predictions_np = probabilities.cpu().detach().numpy().flatten()
+            labels_np = labels.cpu().detach().numpy().flatten()
+
+        return loss, trajectory_data, predictions_np, labels_np
+
+    def _validation_step_with_metrics(
+        self,
+        batch: Dict[str, Any],
+        collect_trajectory_data: bool = False
+    ) -> tuple:
+        """Execute one validation step and return predictions/labels for metrics.
+
+        Returns:
+            Tuple of (loss, trajectory_data, predictions, labels)
+        """
+        # Process batch normally
+        loss, trajectory_data = self._process_batch(batch, training=False, collect_trajectory_data=collect_trajectory_data)
+
+        # Extract predictions and labels for metrics
+        tokenized_actions = batch['proprio_features'].to(self.device)
+        dino_features = torch.cat([
+            batch['dino_features']['begin_frame'],
+            batch['dino_features']['middle_frame'],
+            batch['dino_features']['end_frame']
+        ], dim=1).to(self.device)
+        labels = batch['train_labels'].to(self.device)
+
+        # Crop labels to prediction window (same as in _process_batch)
+        labels = self.crop_labels_fn(
+            labels,
+            self.prediction_window_size,
+            self.prediction_stride
+        )
+        labels = labels[:, labels.shape[1] // 2 - self.prediction_window_size // 2:
+                          labels.shape[1] // 2 + self.prediction_window_size // 2]
+
+        # Get predictions
+        logits = self.model(tokenized_actions, None, dino_features)
+        probabilities = torch.sigmoid(logits)
+
+        # Convert to numpy for metrics
+        predictions_np = probabilities.cpu().detach().numpy().flatten()
+        labels_np = labels.cpu().detach().numpy().flatten()
+
+        return loss, trajectory_data, predictions_np, labels_np
 
     def _default_crop_labels(
         self,

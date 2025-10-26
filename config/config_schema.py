@@ -140,6 +140,9 @@ class TrainingConfig:
         loss_alpha: Alpha for focal loss
         loss_gamma: Gamma for focal loss
 
+        # Metrics
+        classification_threshold: Threshold for binary classification (default: 0.5)
+
         # Regularization
         gradient_clip_val: Gradient clipping value (None to disable)
         use_amp: Use automatic mixed precision
@@ -177,6 +180,9 @@ class TrainingConfig:
     loss_pos_weight: float = 10.0
     loss_alpha: float = 0.25
     loss_gamma: float = 2.0
+
+    # Metrics
+    classification_threshold: float = 0.5
 
     # Regularization
     gradient_clip_val: Optional[float] = None
