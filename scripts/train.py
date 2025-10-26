@@ -202,11 +202,25 @@ def main():
             pos_weight=torch.tensor(config.training.loss_pos_weight)
         )
     else:
+        # Build kwargs based on loss type
+        loss_kwargs = {}
+
+        # Add parameters based on what the loss function accepts
+        if config.training.loss_type in ['weighted_bce', 'bce']:
+            loss_kwargs['pos_weight'] = config.training.loss_pos_weight
+
+        if config.training.loss_type in ['soft_focal', 'focal_bce', 'focal_dist_ce']:
+            if hasattr(config.training, 'loss_alpha'):
+                loss_kwargs['alpha'] = config.training.loss_alpha
+            if hasattr(config.training, 'loss_gamma'):
+                loss_kwargs['gamma'] = config.training.loss_gamma
+
+        # Distribution-based losses don't need pos_weight, alpha, or gamma by default
+        # They have their own default parameters
+
         criterion = get_loss_function(
             config.training.loss_type,
-            pos_weight=config.training.loss_pos_weight,
-            alpha=config.training.loss_alpha,
-            gamma=config.training.loss_gamma
+            **loss_kwargs
         )
 
     print(f"Optimizer: Adam (lr={config.training.learning_rate}, wd={config.training.weight_decay})")
@@ -288,6 +302,10 @@ def main():
     print("Initializing trainer...")
     print("="*80)
 
+    # Determine if using distribution-based loss
+    distribution_losses = ['dist_ce', 'kl_div', 'js_div', 'focal_dist_ce']
+    use_distribution_loss = config.training.loss_type in distribution_losses
+
     trainer = BoundaryTrainer(
         model=model,
         optimizer=optimizer,
@@ -297,7 +315,8 @@ def main():
         scheduler=scheduler,
         prediction_stride=config.data.stride,
         prediction_window_size=config.model.prediction_window_size,
-        classification_threshold=config.training.classification_threshold
+        classification_threshold=config.training.classification_threshold,
+        use_distribution_loss=use_distribution_loss
     )
 
     # Train

@@ -1,15 +1,18 @@
 # Base model configuration
 # Default architecture settings for boundary prediction
 
+# Model architecture
 vocab_size: 2048
-token_embed_dim: 128
+token_embed_dim: 1024
 dino_feature_dim: 3072  # 3 frames * 1024
-hidden_dims: [512, 256, 128]
-prediction_window_size: 18
+hidden_dims: [1024, 512, 256]
+prediction_window_size: 360
 
+# Feature modalities
 use_proprio: true
 use_dino: true
 
+# Regularization
 transformer_dropout: 0.3
 embedding_dropout: 0.1
 dino_encoder_dropout: 0.3

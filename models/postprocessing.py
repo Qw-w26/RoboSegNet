@@ -13,7 +13,8 @@ from scipy.signal import find_peaks
 def non_maximum_suppression(
     probabilities: np.ndarray,
     threshold: float = 0.5,
-    min_distance: int = 5
+    min_distance: int = 5,
+    prominence: Optional[float] = None
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Apply non-maximum suppression to boundary predictions.
@@ -24,20 +25,52 @@ def non_maximum_suppression(
     Args:
         probabilities: Array of boundary probabilities (num_frames,)
         threshold: Minimum probability threshold for a boundary
-        min_distance: Minimum distance between adjacent boundaries
+        min_distance: Minimum distance between adjacent boundaries (in frames)
+                     Recommended: 5 frames @ 5fps = 1 second
+        prominence: Minimum prominence (how much peak stands out above surroundings)
+                   Recommended for dist_ce: 0.005-0.01 (0.5-1% of probability mass)
+                   Higher = more selective (fewer false positives)
 
     Returns:
         Tuple of (boundary_indices, boundary_probabilities)
+
+    Note:
+        For distribution-based losses (dist_ce, kl_div, js_div):
+        - Probabilities sum to 1, so threshold should be low (e.g., 0.01 = 1%)
+        - Use prominence to filter overlapping/blended boundaries
+
+        For per-frame losses (bce):
+        - Probabilities are independent, threshold can be higher (e.g., 0.5)
+        - Prominence less critical
+
+    Example:
+        >>> # For distribution-based models
+        >>> dist = model.predict_distribution(...)  # Sums to 1
+        >>> peaks, probs = non_maximum_suppression(
+        ...     dist[0], threshold=0.01, prominence=0.005, min_distance=5
+        ... )
+
+        >>> # For BCE models
+        >>> probs = torch.sigmoid(model(...))
+        >>> peaks, probs = non_maximum_suppression(
+        ...     probs[0], threshold=0.5, min_distance=5
+        ... )
     """
     if len(probabilities) == 0:
         return np.array([]), np.array([])
 
+    # Build kwargs for find_peaks
+    peak_kwargs = {
+        'height': threshold,
+        'distance': min_distance
+    }
+
+    # Add prominence if specified (key for handling overlapping boundaries)
+    if prominence is not None:
+        peak_kwargs['prominence'] = prominence
+
     # Find peaks in the probability curve
-    peaks, properties = find_peaks(
-        probabilities,
-        height=threshold,
-        distance=min_distance
-    )
+    peaks, properties = find_peaks(probabilities, **peak_kwargs)
 
     # Get the probabilities at peak locations
     peak_probs = probabilities[peaks]
@@ -260,14 +293,18 @@ def detect_boundaries(
     Args:
         probabilities: Array of boundary probabilities
         method: Detection method:
-            - 'nms': Non-maximum suppression (default)
+            - 'nms': Non-maximum suppression (RECOMMENDED for dist_ce)
             - 'threshold': Simple thresholding
             - 'adaptive': Adaptive threshold based on percentile
             - 'topk': Select top-k boundaries
             - 'expected': Match expected number of segments
         threshold: Probability threshold (for 'nms' and 'threshold')
-        min_distance: Minimum distance between boundaries
+                  For dist_ce: 0.005-0.02 (0.5-2% of probability mass)
+                  For BCE: 0.3-0.7 (typical binary threshold)
+        min_distance: Minimum distance between boundaries (frames)
+                     Typical: 5 frames @ 5fps = 1 second between boundaries
         **kwargs: Additional method-specific arguments:
+            - prominence: For 'nms' (RECOMMENDED for dist_ce: 0.005-0.01)
             - percentile: For 'adaptive' (default: 90)
             - k: For 'topk' (required)
             - expected_segments: For 'expected' (required)
@@ -277,18 +314,36 @@ def detect_boundaries(
     Returns:
         Tuple of (boundary_indices, boundary_probabilities)
 
-    Example:
-        # Non-maximum suppression
-        boundaries, probs = detect_boundaries(probs, method='nms', threshold=0.5)
+    Examples:
+        >>> # For distribution-based models (dist_ce, kl_div, js_div)
+        >>> dist = model.predict_distribution(...)  # (batch, 120), sums to 1
+        >>> boundaries, probs = detect_boundaries(
+        ...     dist[0],
+        ...     method='nms',
+        ...     threshold=0.01,      # 1% of probability mass
+        ...     prominence=0.005,    # Must stand out by 0.5%
+        ...     min_distance=5       # At least 1 second apart
+        ... )
 
-        # Top-k detection
-        boundaries, probs = detect_boundaries(probs, method='topk', k=5)
+        >>> # For BCE models
+        >>> probs = torch.sigmoid(model(...))  # Independent per frame
+        >>> boundaries, probs = detect_boundaries(
+        ...     probs[0],
+        ...     method='nms',
+        ...     threshold=0.5,       # Standard binary threshold
+        ...     min_distance=5
+        ... )
 
-        # With smoothing and merging
-        boundaries, probs = detect_boundaries(
-            probs, method='nms',
-            smooth_window=5, merge_distance=3
-        )
+        >>> # Top-k detection (when you know # of boundaries)
+        >>> boundaries, probs = detect_boundaries(
+        ...     dist[0], method='topk', k=3, min_distance=5
+        ... )
+
+        >>> # With smoothing and merging (for noisy predictions)
+        >>> boundaries, probs = detect_boundaries(
+        ...     probs, method='nms',
+        ...     smooth_window=3, merge_distance=3
+        ... )
     """
     # Optional pre-smoothing
     smooth_window = kwargs.get('smooth_window', None)
@@ -297,8 +352,9 @@ def detect_boundaries(
 
     # Detect boundaries based on method
     if method == 'nms':
+        prominence = kwargs.get('prominence', None)
         boundaries, probs = non_maximum_suppression(
-            probabilities, threshold, min_distance
+            probabilities, threshold, min_distance, prominence
         )
     elif method == 'threshold':
         boundaries, probs = threshold_detection(

@@ -424,7 +424,8 @@ class BoundaryTrainer(Trainer):
         prediction_stride: int = 10,
         prediction_window_size: int = 18,
         crop_labels_fn: Optional[Callable] = None,
-        classification_threshold: float = 0.5
+        classification_threshold: float = 0.5,
+        use_distribution_loss: bool = False
     ):
         super().__init__(
             model=model,
@@ -439,8 +440,10 @@ class BoundaryTrainer(Trainer):
         self.prediction_window_size = prediction_window_size
         self.crop_labels_fn = crop_labels_fn or self._default_crop_labels
         self.classification_threshold = classification_threshold
+        self.use_distribution_loss = use_distribution_loss
 
         print(f"Classification threshold: {self.classification_threshold}")
+        print(f"Using distribution loss: {self.use_distribution_loss}")
 
     def _train_epoch(
         self,
@@ -646,12 +649,22 @@ class BoundaryTrainer(Trainer):
                 self.prediction_window_size,
                 self.prediction_stride
             )
-            labels = labels[:, labels.shape[1] // 2 - self.prediction_window_size // 2:
-                              labels.shape[1] // 2 + self.prediction_window_size // 2]
+
+            # Additional cropping to center window if needed
+            if labels.shape[1] > self.prediction_window_size:
+                center = labels.shape[1] // 2
+                start = center - self.prediction_window_size // 2
+                end = center + self.prediction_window_size // 2
+                labels = labels[:, start:end]
 
             # Get predictions
             logits = self.model(tokenized_actions, None, dino_features)
-            probabilities = torch.sigmoid(logits)
+
+            # Use softmax for distribution losses, sigmoid for per-frame losses
+            if self.use_distribution_loss:
+                probabilities = torch.softmax(logits, dim=1)
+            else:
+                probabilities = torch.sigmoid(logits)
 
             # Convert to numpy for metrics
             predictions_np = probabilities.cpu().detach().numpy().flatten()
@@ -687,12 +700,22 @@ class BoundaryTrainer(Trainer):
             self.prediction_window_size,
             self.prediction_stride
         )
-        labels = labels[:, labels.shape[1] // 2 - self.prediction_window_size // 2:
-                          labels.shape[1] // 2 + self.prediction_window_size // 2]
+
+        # Additional cropping to center window if needed
+        if labels.shape[1] > self.prediction_window_size:
+            center = labels.shape[1] // 2
+            start = center - self.prediction_window_size // 2
+            end = center + self.prediction_window_size // 2
+            labels = labels[:, start:end]
 
         # Get predictions
         logits = self.model(tokenized_actions, None, dino_features)
-        probabilities = torch.sigmoid(logits)
+
+        # Use softmax for distribution losses, sigmoid for per-frame losses
+        if self.use_distribution_loss:
+            probabilities = torch.softmax(logits, dim=1)
+        else:
+            probabilities = torch.sigmoid(logits)
 
         # Convert to numpy for metrics
         predictions_np = probabilities.cpu().detach().numpy().flatten()
@@ -708,12 +731,47 @@ class BoundaryTrainer(Trainer):
     ) -> torch.Tensor:
         """Default label cropping function.
 
-        Ported from andrew's code.
+        Handles two cases:
+        1. When prediction_window_size < data_window_size: Crops and downsamples
+        2. When prediction_window_size == data_window_size: Returns labels as-is or with minimal cropping
+
+        Args:
+            labels: Input labels of shape (batch, data_window_size)
+            window_size: Target prediction window size (model.prediction_window_size)
+            stride: Downsampling stride
         """
         label_length = labels.size(1)
+
+        # Case 1: Prediction window equals or exceeds label length - no complex cropping needed
+        if window_size >= label_length:
+            # Just return the labels, possibly downsampled
+            if stride == 1 or label_length <= window_size:
+                return labels
+            else:
+                # Downsample to fit window_size
+                step = max(1, label_length // window_size)
+                return labels[:, ::step][:, :window_size]
+
+        # Case 2: Traditional cropping for hierarchical window setup
+        # Extract a centered region and downsample
         center = label_length // 2
-        start = center - ((stride * window_size) // 2)
-        end = start + stride * window_size
+        required_length = stride * window_size  # Total length needed before downsampling
+
+        # Check if we have enough frames
+        if required_length > label_length:
+            # Not enough frames - just center-crop what we can and downsample
+            start = 0
+            end = label_length
+            cropped = labels[:, start:end:stride]
+            # Pad if needed
+            if cropped.size(1) < window_size:
+                padding = window_size - cropped.size(1)
+                cropped = torch.nn.functional.pad(cropped, (0, padding), mode='replicate')
+            return cropped[:, :window_size]
+
+        # Standard case: enough frames for proper cropping
+        start = center - (required_length // 2)
+        end = start + required_length
 
         assert start >= 0 and end <= label_length, \
             f"Start index {start} is negative or end index {end} is greater than label length {label_length}"
@@ -759,8 +817,16 @@ class BoundaryTrainer(Trainer):
         )
 
         # Additional cropping to center window (from andrew's code)
-        labels = labels[:, labels.shape[1] // 2 - self.prediction_window_size // 2:
-                          labels.shape[1] // 2 + self.prediction_window_size // 2]
+        # Only apply if labels are still longer than prediction window
+        if labels.shape[1] > self.prediction_window_size:
+            center = labels.shape[1] // 2
+            start = center - self.prediction_window_size // 2
+            end = center + self.prediction_window_size // 2
+            labels = labels[:, start:end]
+
+        # Ensure labels match prediction window size exactly
+        assert labels.shape[1] == self.prediction_window_size, \
+            f"Label size {labels.shape[1]} doesn't match prediction window size {self.prediction_window_size}"
 
         # Forward pass
         logits = self.model(tokenized_actions, None, dino_features)
@@ -772,8 +838,23 @@ class BoundaryTrainer(Trainer):
         trajectory_data = []
         if collect_trajectory_data:
             with torch.no_grad():
-                probabilities = torch.sigmoid(logits)
-                predictions = (probabilities > 0.5).float()
+                # Use softmax for distribution losses, sigmoid for per-frame losses
+                if self.use_distribution_loss:
+                    probabilities = torch.softmax(logits, dim=1)
+                    # For distribution: find peaks (argmax gives single boundary per window)
+                    predictions = torch.zeros_like(probabilities)
+                    max_idx = probabilities.argmax(dim=1)
+                    predictions[torch.arange(probabilities.size(0)), max_idx] = 1.0
+
+                    # Normalize ground truth labels to sum to 1 (for fair visual comparison)
+                    normalized_labels = labels.clone()
+                    label_sum = normalized_labels.sum(dim=1, keepdim=True)
+                    label_sum = torch.clamp(label_sum, min=1e-8)  # Avoid division by zero
+                    normalized_labels = normalized_labels / label_sum
+                else:
+                    probabilities = torch.sigmoid(logits)
+                    predictions = (probabilities > self.classification_threshold).float()
+                    normalized_labels = labels  # Keep raw labels for per-frame losses
 
                 for i in range(len(batch['task_id'])):
                     trajectory_data.append({
@@ -781,7 +862,7 @@ class BoundaryTrainer(Trainer):
                         'episode_id': batch['episode_id'][i],
                         'window': batch['window'][i],
                         'predictions': predictions[i].cpu().detach().numpy(),
-                        'ground_truth': labels[i].cpu().detach().numpy(),
+                        'ground_truth': normalized_labels[i].cpu().detach().numpy(),
                         'confidence_scores': probabilities[i].cpu().detach().numpy(),
                         'intervals': batch['intervals'][i]
                     })

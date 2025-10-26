@@ -135,10 +135,12 @@ class TrainingConfig:
         min_lr: Minimum learning rate
 
         # Loss
-        loss_type: Loss function ('bce', 'focal', 'soft_focal', 'weighted_bce')
-        loss_pos_weight: Positive class weight for BCE loss
-        loss_alpha: Alpha for focal loss
-        loss_gamma: Gamma for focal loss
+        loss_type: Loss function type
+                   Distribution-based (recommended): 'dist_ce', 'kl_div', 'js_div', 'focal_dist_ce'
+                   Per-frame binary: 'bce', 'focal', 'soft_focal', 'weighted_bce', 'mse'
+        loss_pos_weight: Positive class weight for BCE-based losses
+        loss_alpha: Alpha parameter for focal losses
+        loss_gamma: Gamma parameter for focal losses
 
         # Metrics
         classification_threshold: Threshold for binary classification (default: 0.5)

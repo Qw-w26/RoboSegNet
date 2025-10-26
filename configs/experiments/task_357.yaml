@@ -8,7 +8,7 @@ model:
   token_embed_dim: 128
   dino_feature_dim: 3072
   hidden_dims: [512, 256, 128]
-  prediction_window_size: 18
+  prediction_window_size: 120
   use_proprio: true
   use_dino: true
   transformer_dropout: 0.3
@@ -22,7 +22,7 @@ data:
   cache_dir: ./cache
 
   # Dataset parameters
-  window_size: 180
+  window_size: 360
   stride: 10
   fps: 5.0
   action_dim: 14
@@ -52,12 +52,18 @@ training:
   scheduler: cosine
   min_lr: 0.000001
 
-  # Loss
-  loss_type: bce
-  loss_pos_weight: 10.0
+  # Loss function: dist_ce | kl_div | js_div | focal_dist_ce | bce | weighted_bce | soft_focal | focal_bce | mse
+  # RECOMMENDED: dist_ce (Distribution Cross-Entropy) - treats window as probability distribution
+  # LEGACY: bce (Binary Cross-Entropy) - treats each frame independently (not ideal for this task)
+  loss_type: dist_ce
+
+  # Loss hyperparameters (only applicable to certain loss types)
+  loss_pos_weight: 10.0  # For: bce, weighted_bce
+  loss_alpha: 0.25       # For: soft_focal, focal_bce, focal_dist_ce
+  loss_gamma: 2.0        # For: soft_focal, focal_bce, focal_dist_ce
 
   # Metrics
-  classification_threshold: 0.3  # Threshold for binary classification (probability > threshold = boundary)
+  classification_threshold: 0.03  # Threshold for binary classification (probability > threshold = boundary)
 
   # Regularization
   gradient_clip_val: null

@@ -241,10 +241,50 @@ class BoundaryPredictionMLP(nn.Module):
         self,
         tokenized_actions: Optional[torch.Tensor],
         proprio_stats: Optional[torch.Tensor],
+        dino_features: Optional[torch.Tensor],
+        use_softmax: bool = False
+    ) -> torch.Tensor:
+        """
+        Get boundary probabilities from logits.
+
+        Args:
+            tokenized_actions: Token IDs
+            proprio_stats: Proprioception statistics (unused)
+            dino_features: DINO features
+            use_softmax: If True, apply softmax (for distribution-based losses).
+                        If False, apply sigmoid (for per-frame BCE losses).
+                        Default: False for backward compatibility.
+
+        Returns:
+            Probabilities of shape (batch, prediction_window_size)
+
+        Example:
+            >>> # For distribution-based losses (dist_ce, kl_div, js_div)
+            >>> probs = model.predict_probabilities(..., use_softmax=True)
+            >>>
+            >>> # For per-frame losses (bce, weighted_bce)
+            >>> probs = model.predict_probabilities(..., use_softmax=False)
+        """
+        logits = self.forward(tokenized_actions, proprio_stats, dino_features)
+
+        if use_softmax:
+            # Distribution-based: probabilities sum to 1 across window
+            return torch.softmax(logits, dim=1)
+        else:
+            # Per-frame binary: independent probabilities per frame
+            return torch.sigmoid(logits)
+
+    def predict_distribution(
+        self,
+        tokenized_actions: Optional[torch.Tensor],
+        proprio_stats: Optional[torch.Tensor],
         dino_features: Optional[torch.Tensor]
     ) -> torch.Tensor:
         """
-        Get boundary probabilities (sigmoid of logits).
+        Get boundary probability distribution (softmax of logits).
+
+        This is the recommended prediction method when using distribution-based
+        losses (dist_ce, kl_div, js_div, focal_dist_ce).
 
         Args:
             tokenized_actions: Token IDs
@@ -252,10 +292,20 @@ class BoundaryPredictionMLP(nn.Module):
             dino_features: DINO features
 
         Returns:
-            Probabilities of shape (batch, prediction_window_size)
+            Probability distribution of shape (batch, prediction_window_size)
+            where probabilities sum to 1 across the window dimension.
+
+        Example:
+            >>> dist = model.predict_distribution(tokens, None, dino)
+            >>> # Find most likely boundary position
+            >>> boundary_frame = dist.argmax(dim=1)
         """
-        logits = self.forward(tokenized_actions, proprio_stats, dino_features)
-        return torch.sigmoid(logits)
+        return self.predict_probabilities(
+            tokenized_actions,
+            proprio_stats,
+            dino_features,
+            use_softmax=True
+        )
 
     def get_num_parameters(self) -> dict:
         """

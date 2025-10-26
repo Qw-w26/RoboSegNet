@@ -353,6 +353,389 @@ class MSEProbabilityLoss(nn.Module):
             return loss
 
 
+# ============================================================================
+# Distribution-Based Losses (for window-based boundary prediction)
+# ============================================================================
+
+
+class DistributionCrossEntropyLoss(nn.Module):
+    """
+    Cross-Entropy loss treating the prediction window as a probability distribution.
+
+    RECOMMENDED for boundary prediction with Gaussian-smoothed labels.
+
+    This loss treats the model outputs as a distribution over frame positions
+    in the prediction window, rather than independent binary classifications.
+    This is fundamentally more appropriate when:
+    - Labels are continuous probability distributions (Gaussian smoothed)
+    - The task is to predict WHERE a boundary occurs (localization)
+    - Multiple boundaries may exist in a window (multi-modal distribution)
+
+    Key advantages over BCE:
+    - Enforces probability mass conservation across the window
+    - Handles multiple boundaries naturally (multi-modal distributions)
+    - Invariant to the exact shape of label smoothing kernel
+    - Theoretically sound for localization tasks
+
+    Mathematical formulation:
+        1. Normalize labels to sum to 1: Q[i] = L[i] / Σⱼ L[j]
+        2. Apply softmax to logits: P[i] = exp(z[i]) / Σⱼ exp(z[j])
+        3. Cross-entropy: ℒ = -Σᵢ Q[i] * log(P[i])
+
+    Reference:
+        Standard cross-entropy loss for probability distributions
+    """
+
+    def __init__(self, epsilon: float = 1e-8, uniform_on_zero: bool = True, reduction: str = 'mean'):
+        """
+        Initialize Distribution Cross-Entropy Loss.
+
+        Args:
+            epsilon: Small constant for numerical stability
+            uniform_on_zero: If True, use uniform distribution when labels sum to ~0
+                           (windows with no boundaries). If False, skip those samples.
+            reduction: 'mean', 'sum', or 'none'
+
+        Example:
+            >>> loss_fn = DistributionCrossEntropyLoss()
+            >>> logits = model(inputs)  # (batch, 120)
+            >>> labels = gaussian_smoothed_labels  # (batch, 120)
+            >>> loss = loss_fn(logits, labels)
+        """
+        super().__init__()
+        self.epsilon = epsilon
+        self.uniform_on_zero = uniform_on_zero
+        self.reduction = reduction
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """
+        Compute distribution cross-entropy loss.
+
+        Args:
+            logits: Model logits of shape (batch, window_size)
+            targets: Smoothed probability targets of shape (batch, window_size)
+
+        Returns:
+            Scalar loss value (or tensor if reduction='none')
+        """
+        # Normalize labels to sum to 1 (convert to probability distribution)
+        label_sum = targets.sum(dim=1, keepdim=True)
+
+        # Handle windows with no boundaries
+        if self.uniform_on_zero:
+            # Use uniform distribution when sum is near zero
+            mask_zero = (label_sum < self.epsilon).squeeze(1)
+            label_sum = torch.clamp(label_sum, min=self.epsilon)
+            target_dist = targets / label_sum
+
+            # For zero-boundary windows, use uniform distribution
+            if mask_zero.any():
+                uniform = torch.ones_like(targets) / targets.size(1)
+                target_dist = torch.where(
+                    mask_zero.unsqueeze(1),
+                    uniform,
+                    target_dist
+                )
+        else:
+            # Skip samples with no boundaries
+            mask_nonzero = (label_sum >= self.epsilon).squeeze(1)
+            if not mask_nonzero.any():
+                # All samples have zero boundaries, return zero loss
+                return torch.tensor(0.0, device=logits.device)
+
+            label_sum = label_sum[mask_nonzero]
+            target_dist = targets[mask_nonzero] / label_sum
+            logits = logits[mask_nonzero]
+
+        # Compute log softmax (numerically stable)
+        log_probs = F.log_softmax(logits, dim=1)
+
+        # Cross-entropy: -Σ Q[i] * log(P[i])
+        loss = -(target_dist * log_probs).sum(dim=1)
+
+        if self.reduction == 'mean':
+            return loss.mean()
+        elif self.reduction == 'sum':
+            return loss.sum()
+        else:
+            return loss
+
+
+class KLDivergenceLoss(nn.Module):
+    """
+    KL Divergence loss for distribution matching.
+
+    Computes KL(target || prediction) where both are treated as probability
+    distributions over the prediction window.
+
+    Note: For optimization purposes, KL divergence and cross-entropy are
+    equivalent (differ only by a constant H(target)). This is provided
+    as a separate option for clarity and compatibility.
+
+    Mathematical formulation:
+        KL(Q || P) = Σᵢ Q[i] * log(Q[i] / P[i])
+                   = Σᵢ Q[i] * log(Q[i]) - Σᵢ Q[i] * log(P[i])
+                   = H(Q) + CE(Q, P)
+    """
+
+    def __init__(self, epsilon: float = 1e-8, uniform_on_zero: bool = True, reduction: str = 'batchmean'):
+        """
+        Initialize KL Divergence Loss.
+
+        Args:
+            epsilon: Small constant for numerical stability
+            uniform_on_zero: Use uniform distribution for zero-boundary windows
+            reduction: 'batchmean' (default), 'mean', 'sum', or 'none'
+                     'batchmean' divides by batch size (PyTorch KL convention)
+
+        Example:
+            >>> loss_fn = KLDivergenceLoss()
+            >>> logits = model(inputs)
+            >>> loss = loss_fn(logits, labels)
+        """
+        super().__init__()
+        self.epsilon = epsilon
+        self.uniform_on_zero = uniform_on_zero
+        self.reduction = reduction
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """
+        Compute KL divergence loss.
+
+        Args:
+            logits: Model logits of shape (batch, window_size)
+            targets: Smoothed probability targets of shape (batch, window_size)
+
+        Returns:
+            Scalar loss value
+        """
+        # Normalize labels to probability distribution
+        label_sum = targets.sum(dim=1, keepdim=True)
+
+        if self.uniform_on_zero:
+            mask_zero = (label_sum < self.epsilon).squeeze(1)
+            label_sum = torch.clamp(label_sum, min=self.epsilon)
+            target_dist = targets / label_sum
+
+            if mask_zero.any():
+                uniform = torch.ones_like(targets) / targets.size(1)
+                target_dist = torch.where(
+                    mask_zero.unsqueeze(1),
+                    uniform,
+                    target_dist
+                )
+        else:
+            mask_nonzero = (label_sum >= self.epsilon).squeeze(1)
+            if not mask_nonzero.any():
+                return torch.tensor(0.0, device=logits.device)
+
+            label_sum = label_sum[mask_nonzero]
+            target_dist = targets[mask_nonzero] / label_sum
+            logits = logits[mask_nonzero]
+
+        # Compute log probabilities
+        log_probs = F.log_softmax(logits, dim=1)
+
+        # KL divergence using PyTorch's built-in
+        # F.kl_div expects (log_predictions, targets)
+        loss = F.kl_div(log_probs, target_dist, reduction=self.reduction)
+
+        return loss
+
+
+class JensenShannonLoss(nn.Module):
+    """
+    Jensen-Shannon Divergence loss for symmetric distribution matching.
+
+    JS divergence is a symmetric and bounded variant of KL divergence:
+        JS(P || Q) = 0.5 * KL(P || M) + 0.5 * KL(Q || M)
+    where M = 0.5 * (P + Q)
+
+    Properties:
+    - Symmetric: JS(P || Q) = JS(Q || P)
+    - Bounded: JS ∈ [0, 1] (when using log base 2)
+    - Smooth: No issues when P or Q have zeros
+
+    Useful when you want:
+    - Symmetric penalty (prediction vs target treated equally)
+    - Robust gradients (better behaved than KL at distribution boundaries)
+    """
+
+    def __init__(self, epsilon: float = 1e-8, uniform_on_zero: bool = True, reduction: str = 'mean'):
+        """
+        Initialize Jensen-Shannon Divergence Loss.
+
+        Args:
+            epsilon: Small constant for numerical stability
+            uniform_on_zero: Use uniform distribution for zero-boundary windows
+            reduction: 'mean', 'sum', or 'none'
+
+        Example:
+            >>> loss_fn = JensenShannonLoss()
+            >>> logits = model(inputs)
+            >>> loss = loss_fn(logits, labels)
+        """
+        super().__init__()
+        self.epsilon = epsilon
+        self.uniform_on_zero = uniform_on_zero
+        self.reduction = reduction
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """
+        Compute Jensen-Shannon divergence loss.
+
+        Args:
+            logits: Model logits of shape (batch, window_size)
+            targets: Smoothed probability targets of shape (batch, window_size)
+
+        Returns:
+            Scalar loss value
+        """
+        # Get prediction probabilities
+        pred_probs = F.softmax(logits, dim=1)
+
+        # Normalize target labels
+        label_sum = targets.sum(dim=1, keepdim=True)
+
+        if self.uniform_on_zero:
+            mask_zero = (label_sum < self.epsilon).squeeze(1)
+            label_sum = torch.clamp(label_sum, min=self.epsilon)
+            target_dist = targets / label_sum
+
+            if mask_zero.any():
+                uniform = torch.ones_like(targets) / targets.size(1)
+                target_dist = torch.where(
+                    mask_zero.unsqueeze(1),
+                    uniform,
+                    target_dist
+                )
+        else:
+            mask_nonzero = (label_sum >= self.epsilon).squeeze(1)
+            if not mask_nonzero.any():
+                return torch.tensor(0.0, device=logits.device)
+
+            label_sum = label_sum[mask_nonzero]
+            target_dist = targets[mask_nonzero] / label_sum
+            pred_probs = pred_probs[mask_nonzero]
+
+        # Compute mixture distribution
+        mixture = 0.5 * (pred_probs + target_dist)
+        mixture_log = torch.log(mixture + self.epsilon)
+
+        # KL(P || M)
+        kl_pred_mixture = (pred_probs * (torch.log(pred_probs + self.epsilon) - mixture_log)).sum(dim=1)
+
+        # KL(Q || M)
+        kl_target_mixture = (target_dist * (torch.log(target_dist + self.epsilon) - mixture_log)).sum(dim=1)
+
+        # JS divergence
+        js_div = 0.5 * (kl_pred_mixture + kl_target_mixture)
+
+        if self.reduction == 'mean':
+            return js_div.mean()
+        elif self.reduction == 'sum':
+            return js_div.sum()
+        else:
+            return js_div
+
+
+class FocalDistributionCELoss(nn.Module):
+    """
+    Focal variant of Distribution Cross-Entropy Loss.
+
+    Combines distribution-based cross-entropy with focal loss weighting
+    to focus on hard-to-predict boundary positions.
+
+    Useful when:
+    - Some boundary positions are consistently harder to predict
+    - You want to down-weight easy examples
+    - Training needs to focus on ambiguous temporal regions
+    """
+
+    def __init__(
+        self,
+        gamma: float = 2.0,
+        epsilon: float = 1e-8,
+        uniform_on_zero: bool = True,
+        reduction: str = 'mean'
+    ):
+        """
+        Initialize Focal Distribution CE Loss.
+
+        Args:
+            gamma: Focusing parameter (higher = more focus on hard examples)
+            epsilon: Numerical stability constant
+            uniform_on_zero: Use uniform distribution for zero-boundary windows
+            reduction: 'mean', 'sum', or 'none'
+
+        Example:
+            >>> loss_fn = FocalDistributionCELoss(gamma=2.0)
+            >>> loss = loss_fn(logits, labels)
+        """
+        super().__init__()
+        self.gamma = gamma
+        self.epsilon = epsilon
+        self.uniform_on_zero = uniform_on_zero
+        self.reduction = reduction
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """
+        Compute focal distribution cross-entropy loss.
+
+        Args:
+            logits: Model logits of shape (batch, window_size)
+            targets: Smoothed probability targets of shape (batch, window_size)
+
+        Returns:
+            Scalar loss value
+        """
+        # Normalize targets
+        label_sum = targets.sum(dim=1, keepdim=True)
+
+        if self.uniform_on_zero:
+            mask_zero = (label_sum < self.epsilon).squeeze(1)
+            label_sum = torch.clamp(label_sum, min=self.epsilon)
+            target_dist = targets / label_sum
+
+            if mask_zero.any():
+                uniform = torch.ones_like(targets) / targets.size(1)
+                target_dist = torch.where(
+                    mask_zero.unsqueeze(1),
+                    uniform,
+                    target_dist
+                )
+        else:
+            mask_nonzero = (label_sum >= self.epsilon).squeeze(1)
+            if not mask_nonzero.any():
+                return torch.tensor(0.0, device=logits.device)
+
+            label_sum = label_sum[mask_nonzero]
+            target_dist = targets[mask_nonzero] / label_sum
+            logits = logits[mask_nonzero]
+
+        # Get probabilities
+        probs = F.softmax(logits, dim=1)
+        log_probs = F.log_softmax(logits, dim=1)
+
+        # Compute agreement between prediction and target
+        # pt represents how well prediction matches target distribution
+        pt = (target_dist * probs).sum(dim=1)
+
+        # Focal weight
+        focal_weight = (1 - pt) ** self.gamma
+
+        # Cross-entropy with focal weighting
+        ce_loss = -(target_dist * log_probs).sum(dim=1)
+        loss = focal_weight * ce_loss
+
+        if self.reduction == 'mean':
+            return loss.mean()
+        elif self.reduction == 'sum':
+            return loss.sum()
+        else:
+            return loss
+
+
 def get_loss_function(
     loss_name: str,
     **kwargs
@@ -368,6 +751,14 @@ def get_loss_function(
         Loss function module
 
     Supported losses:
+
+        Distribution-based (RECOMMENDED for window-based boundary prediction):
+        - 'dist_ce': DistributionCrossEntropyLoss (RECOMMENDED)
+        - 'kl_div': KLDivergenceLoss
+        - 'js_div': JensenShannonLoss
+        - 'focal_dist_ce': FocalDistributionCELoss
+
+        Per-frame binary classification (legacy):
         - 'focal': FocalLoss
         - 'soft_focal': SoftFocalLoss
         - 'focal_bce': FocalLossBCE
@@ -376,9 +767,20 @@ def get_loss_function(
         - 'mse': MSEProbabilityLoss
 
     Example:
+        >>> # Recommended for boundary prediction
+        >>> loss_fn = get_loss_function('dist_ce')
+        >>>
+        >>> # Legacy BCE-based
         >>> loss_fn = get_loss_function('soft_focal', alpha=0.25, gamma=2.0)
     """
     loss_map = {
+        # Distribution-based losses (recommended)
+        'dist_ce': DistributionCrossEntropyLoss,
+        'kl_div': KLDivergenceLoss,
+        'js_div': JensenShannonLoss,
+        'focal_dist_ce': FocalDistributionCELoss,
+
+        # Per-frame losses (legacy)
         'focal': FocalLoss,
         'soft_focal': SoftFocalLoss,
         'focal_bce': FocalLossBCE,
