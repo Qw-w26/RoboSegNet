@@ -8,7 +8,7 @@ model:
   token_embed_dim: 128
   dino_feature_dim: 3072
   hidden_dims: [512, 256, 128]
-  prediction_window_size: 360
+  prediction_window_size: 180
   use_proprio: true
   use_dino: true
   transformer_dropout: 0.3
@@ -18,11 +18,11 @@ model:
   feature_noise_std: 0.05
 
 data:
-  splits_dir: ./splits
+  splits_dir: ././data_task_357
   cache_dir: ./cache
 
   # Dataset parameters
-  window_size: 360
+  window_size: 180
   stride: 10
   fps: 5.0
   action_dim: 14
@@ -63,7 +63,7 @@ training:
   loss_gamma: 2.0        # For: soft_focal, focal_bce, focal_dist_ce
 
   # Metrics
-  classification_threshold: 0.5  # Threshold for binary classification (probability > threshold = boundary)
+  classification_threshold: 0.3  # Threshold for binary classification (probability > threshold = boundary)
 
   # Regularization
   gradient_clip_val: null

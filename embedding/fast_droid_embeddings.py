@@ -71,7 +71,7 @@ class FastDROIDEmbedder:
 
     def _load_tokenizer(self):
         """Load Fast-DROID tokenizer."""
-        tokenizer = AutoTokenizer.from_pretrained("KarlP/fast-droid")
+        tokenizer = AutoTokenizer.from_pretrained("physical-intelligence/fast")
         tokenizer.add_special_tokens({
             'pad_token': '[PAD]',
             'eos_token': '[EOS]',
