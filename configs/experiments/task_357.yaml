@@ -8,7 +8,7 @@ model:
   token_embed_dim: 128
   dino_feature_dim: 3072
   hidden_dims: [512, 256, 128]
-  prediction_window_size: 120
+  prediction_window_size: 360
   use_proprio: true
   use_dino: true
   transformer_dropout: 0.3
@@ -44,7 +44,7 @@ data:
 
 training:
   num_epochs: 100
-  learning_rate: 0.0005
+  learning_rate: 0.001
   weight_decay: 0.0001
   optimizer: adam
 
@@ -63,7 +63,7 @@ training:
   loss_gamma: 2.0        # For: soft_focal, focal_bce, focal_dist_ce
 
   # Metrics
-  classification_threshold: 0.03  # Threshold for binary classification (probability > threshold = boundary)
+  classification_threshold: 0.5  # Threshold for binary classification (probability > threshold = boundary)
 
   # Regularization
   gradient_clip_val: null

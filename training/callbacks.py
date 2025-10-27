@@ -168,7 +168,7 @@ class WandBCallback(Callback):
 
         # Log prediction plots if it's time
         if (epoch + 1) % self.log_plots_every == 0:
-            # Log training predictions
+            # Log training predictions (window-level, legacy)
             if 'train_trajectory_data' in logs and logs['train_trajectory_data']:
                 self._log_prediction_plots(
                     logs['train_trajectory_data'],
@@ -176,13 +176,29 @@ class WandBCallback(Callback):
                     data_type='train'
                 )
 
-            # Log validation predictions
+            # Log validation predictions (window-level, legacy)
             if 'val_trajectory_data' in logs and logs['val_trajectory_data']:
                 self._log_prediction_plots(
                     logs['val_trajectory_data'],
                     epoch=epoch,
                     data_type='val'
                 )
+
+        # Log trajectory-level plots (always log when available, regardless of epoch)
+        # These are computed from accumulated data across full trajectories
+        if 'train_trajectory_plots' in logs and logs['train_trajectory_plots']:
+            self._log_trajectory_timeline_plots(
+                logs['train_trajectory_plots'],
+                epoch=epoch,
+                data_type='train'
+            )
+
+        if 'val_trajectory_plots' in logs and logs['val_trajectory_plots']:
+            self._log_trajectory_timeline_plots(
+                logs['val_trajectory_plots'],
+                epoch=epoch,
+                data_type='val'
+            )
 
     def on_train_end(self, trainer: 'Trainer', logs: Dict[str, Any]) -> None:
         """Finish W&B run."""
@@ -277,6 +293,112 @@ class WandBCallback(Callback):
         ax.legend()
         ax.grid(True, alpha=0.3)
         ax.set_ylim(-0.1, 1.1)
+
+    def _log_trajectory_timeline_plots(
+        self,
+        trajectory_plots: List[Dict[str, Any]],
+        epoch: int,
+        data_type: str = 'val'
+    ) -> None:
+        """Log trajectory-level timeline plots to W&B.
+
+        Creates plots showing full trajectory timelines with:
+        - Prediction scores across the entire trajectory
+        - Classification threshold line
+        - Binary predictions after thresholding
+        - Ground truth transition markers
+
+        Args:
+            trajectory_plots: List of trajectory plot data from trainer
+            epoch: Current epoch number
+            data_type: 'train' or 'val'
+        """
+        import wandb
+
+        if len(trajectory_plots) == 0:
+            print(f"No {data_type} trajectory plots available")
+            return
+
+        # Select a subset of trajectories to plot (max 6)
+        num_plots = min(6, len(trajectory_plots))
+        selected_indices = random.sample(range(len(trajectory_plots)), num_plots)
+
+        print(f"Logging {num_plots} {data_type} trajectory timeline plots to wandb "
+              f"for epoch {epoch}...")
+
+        # Create subplot grid (2 columns)
+        num_rows = (num_plots + 1) // 2
+        fig, axes = plt.subplots(num_rows, 2, figsize=(16, 4 * num_rows))
+        if num_rows == 1:
+            axes = axes.reshape(1, -1)
+        axes = axes.flatten()
+
+        for plot_idx, traj_idx in enumerate(selected_indices):
+            traj_plot_data = trajectory_plots[traj_idx]
+            ax = axes[plot_idx]
+            self._create_trajectory_timeline_plot(traj_plot_data, ax)
+
+        # Hide unused subplots
+        for ax in axes[num_plots:]:
+            ax.axis('off')
+
+        plt.tight_layout()
+        wandb.log({f"epoch_{epoch:03d}_{data_type}_trajectory_timelines": wandb.Image(fig)})
+        plt.close(fig)
+
+        print(f"Logged {num_plots} {data_type} trajectory timeline plots to wandb")
+
+    def _create_trajectory_timeline_plot(
+        self,
+        plot_data: Dict[str, Any],
+        ax: plt.Axes
+    ) -> None:
+        """Create a single trajectory timeline plot.
+
+        Args:
+            plot_data: Dictionary with keys:
+                - 'task_id': Task ID
+                - 'episode_id': Episode ID
+                - 'timeline_scores': Prediction scores for each frame
+                - 'ground_truth_transitions': List of ground truth transition frame indices
+                - 'threshold': Classification threshold value
+            ax: Matplotlib axes to plot on
+        """
+        task_id = plot_data['task_id']
+        episode_id = plot_data['episode_id']
+        timeline_scores = plot_data['timeline_scores']
+        ground_truth_transitions = plot_data['ground_truth_transitions']
+        threshold = plot_data['threshold']
+
+        # Create time axis
+        time_axis = np.arange(len(timeline_scores))
+
+        # Plot prediction scores
+        ax.plot(time_axis, timeline_scores, 'b-', alpha=0.7, linewidth=1.5,
+               label='Prediction Scores')
+
+        # Plot threshold line
+        ax.axhline(y=threshold, color='orange', linestyle='--', linewidth=1.5,
+                  alpha=0.7, label=f'Threshold ({threshold:.2f})')
+
+        # Plot ground truth transitions as vertical lines
+        for trans_idx in ground_truth_transitions:
+            if 0 <= trans_idx < len(timeline_scores):
+                ax.axvline(x=trans_idx, color='red', linestyle='-',
+                          linewidth=2, alpha=0.8, label='GT Transition'
+                          if trans_idx == ground_truth_transitions[0] else '')
+
+        # Formatting
+        ax.set_title(f'Task {task_id}, Episode {episode_id} - Full Trajectory')
+        ax.set_xlabel('Frame Index')
+        ax.set_ylabel('Boundary Score')
+        ax.set_ylim(-0.05, 1.05)
+        ax.grid(True, alpha=0.3)
+
+        # Legend (avoid duplicate labels)
+        handles, labels = ax.get_legend_handles_labels()
+        by_label = dict(zip(labels, handles))
+        ax.legend(by_label.values(), by_label.keys(), loc='upper right', fontsize=8)
 
 
 class CheckpointCallback(Callback):

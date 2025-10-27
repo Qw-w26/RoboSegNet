@@ -21,7 +21,7 @@ Example:
     >>> trainer.fit(train_loader, val_loader, num_epochs=100)
 """
 
-from typing import Any, Dict, List, Optional, Callable
+from typing import Any, Dict, List, Optional, Callable, Tuple
 from pathlib import Path
 import warnings
 
@@ -169,6 +169,7 @@ class Trainer:
             val_trajectory_data = []
             val_accuracy = 0.0
             val_f1 = 0.0
+            val_results = {}
             if val_loader is not None:
                 val_results = self._validate_epoch(
                     val_loader,
@@ -198,10 +199,19 @@ class Trainer:
                 'epoch': epoch
             }
 
-            # Add trajectory data if collected
+            # Add trajectory data if collected (legacy window-level plots)
             if should_collect_plots:
                 logs['train_trajectory_data'] = train_trajectory_data
                 logs['val_trajectory_data'] = val_trajectory_data
+
+            # Add trajectory-level plots (always include when available)
+            train_trajectory_plots = train_results.get('trajectory_plots', [])
+            val_trajectory_plots = val_results.get('trajectory_plots', []) if val_loader is not None else []
+
+            if train_trajectory_plots:
+                logs['train_trajectory_plots'] = train_trajectory_plots
+            if val_trajectory_plots:
+                logs['val_trajectory_plots'] = val_trajectory_plots
 
             # Print epoch summary
             print(f"Train Loss: {train_loss:.4f}, Acc: {train_results.get('accuracy', 0.0):.4f}, F1: {train_results.get('f1_score', 0.0):.4f}", end='')
@@ -451,18 +461,17 @@ class BoundaryTrainer(Trainer):
         log_every: int = 10,
         collect_trajectory_data: bool = False
     ) -> Dict[str, Any]:
-        """Train for one epoch with metric computation.
+        """Train for one epoch with trajectory-level metric computation.
 
         Returns:
-            Dictionary with 'loss', 'accuracy', 'f1_score', 'trajectory_data'
+            Dictionary with 'loss', 'accuracy', 'f1_score', 'trajectory_data', 'trajectory_plots'
         """
         self.model.train()
         total_loss = 0.0
         trajectory_data = []
 
-        # Accumulate predictions and labels for metrics
-        all_predictions = []
-        all_labels = []
+        # Accumulate batch metadata for trajectory-level metrics
+        all_batch_data = []
 
         pbar = tqdm(train_loader, desc=f'Epoch {self.current_epoch+1}')
         for batch_idx, batch in enumerate(pbar):
@@ -471,13 +480,12 @@ class BoundaryTrainer(Trainer):
                 callback.on_batch_begin(self, batch_idx)
 
             # Forward pass
-            loss, batch_trajectory_data, predictions, labels = self._train_step_with_metrics(
+            loss, batch_trajectory_data, batch_metadata = self._train_step_with_metrics(
                 batch, collect_trajectory_data
             )
 
-            # Accumulate for metrics
-            all_predictions.append(predictions)
-            all_labels.append(labels)
+            # Accumulate batch metadata for trajectory-level metrics
+            all_batch_data.append(batch_metadata)
 
             # Backward pass
             self.optimizer.zero_grad()
@@ -510,14 +518,15 @@ class BoundaryTrainer(Trainer):
 
         avg_loss = total_loss / len(train_loader)
 
-        # Compute metrics from accumulated predictions
-        metrics = self._compute_metrics(all_predictions, all_labels)
+        # Compute trajectory-level metrics
+        metrics = self._compute_metrics([], [], all_batch_data=all_batch_data)
 
         return {
             'loss': avg_loss,
             'accuracy': metrics['accuracy'],
             'f1_score': metrics['f1_score'],
-            'trajectory_data': trajectory_data
+            'trajectory_data': trajectory_data,
+            'trajectory_plots': metrics.get('trajectory_plots', [])
         }
 
     def _validate_epoch(
@@ -525,10 +534,10 @@ class BoundaryTrainer(Trainer):
         val_loader: DataLoader,
         collect_trajectory_data: bool = False
     ) -> Dict[str, Any]:
-        """Validate for one epoch with metric computation.
+        """Validate for one epoch with trajectory-level metric computation.
 
         Returns:
-            Dictionary with 'loss', 'accuracy', 'f1_score', 'trajectory_data'
+            Dictionary with 'loss', 'accuracy', 'f1_score', 'trajectory_data', 'trajectory_plots'
         """
         # Callback: on_validation_begin
         for callback in self.callbacks:
@@ -538,21 +547,19 @@ class BoundaryTrainer(Trainer):
         total_loss = 0.0
         trajectory_data = []
 
-        # Accumulate predictions and labels for metrics
-        all_predictions = []
-        all_labels = []
+        # Accumulate batch metadata for trajectory-level metrics
+        all_batch_data = []
 
         with torch.no_grad():
             for batch in tqdm(val_loader, desc='Validation'):
                 # Forward pass only
-                loss, batch_trajectory_data, predictions, labels = self._validation_step_with_metrics(
+                loss, batch_trajectory_data, batch_metadata = self._validation_step_with_metrics(
                     batch,
                     collect_trajectory_data
                 )
 
-                # Accumulate for metrics
-                all_predictions.append(predictions)
-                all_labels.append(labels)
+                # Accumulate batch metadata for trajectory-level metrics
+                all_batch_data.append(batch_metadata)
 
                 total_loss += loss.item()
 
@@ -562,8 +569,8 @@ class BoundaryTrainer(Trainer):
 
         avg_loss = total_loss / len(val_loader)
 
-        # Compute metrics from accumulated predictions
-        metrics = self._compute_metrics(all_predictions, all_labels)
+        # Compute trajectory-level metrics
+        metrics = self._compute_metrics([], [], all_batch_data=all_batch_data)
 
         # Callback: on_validation_end
         val_logs = {
@@ -578,62 +585,265 @@ class BoundaryTrainer(Trainer):
             'loss': avg_loss,
             'accuracy': metrics['accuracy'],
             'f1_score': metrics['f1_score'],
-            'trajectory_data': trajectory_data
+            'trajectory_data': trajectory_data,
+            'trajectory_plots': metrics.get('trajectory_plots', [])
         }
 
-    def _compute_metrics(
+    def _accumulate_trajectory_predictions(
         self,
-        all_predictions: List[np.ndarray],
-        all_labels: List[np.ndarray]
-    ) -> Dict[str, float]:
-        """Compute accuracy and F1 from accumulated predictions and labels using configurable threshold."""
-        # Concatenate all predictions and labels
-        predictions = np.concatenate(all_predictions, axis=0)
-        labels = np.concatenate(all_labels, axis=0)
+        all_batch_data: List[Dict[str, Any]]
+    ) -> Dict[Tuple[int, int], Dict[str, Any]]:
+        """Accumulate window predictions into full trajectory predictions.
 
-        # Ensure arrays have the same shape
-        if predictions.shape != labels.shape:
-            min_len = min(len(predictions), len(labels))
-            predictions = predictions[:min_len]
-            labels = labels[:min_len]
+        Handles both per-frame (sigmoid) and distribution (softmax) predictions differently:
+        - Per-frame: Simple averaging of overlapping predictions
+        - Distribution: Normalize predictions before accumulation to maintain relative scales
 
-        # Convert to binary using configurable threshold
-        binary_predictions = (predictions > self.classification_threshold).astype(int)
-        binary_ground_truth = (labels > 0.5).astype(int)
+        Args:
+            all_batch_data: List of batch data dictionaries containing predictions, labels, and metadata
 
-        # Calculate confusion matrix elements
-        tp = np.sum((binary_predictions == 1) & (binary_ground_truth == 1))
-        fp = np.sum((binary_predictions == 1) & (binary_ground_truth == 0))
-        fn = np.sum((binary_predictions == 0) & (binary_ground_truth == 1))
-        tn = np.sum((binary_predictions == 0) & (binary_ground_truth == 0))
+        Returns:
+            Dictionary mapping (task_id, episode_id) to trajectory data with:
+                - 'timeline_scores': Accumulated prediction scores for each frame
+                - 'timeline_counts': Number of windows contributing to each frame
+                - 'ground_truth_transitions': List of ground truth transition frame indices
+                - 'num_frames': Total number of frames in trajectory
+        """
+        # First pass: determine trajectory lengths
+        traj_max_frames = {}
+        traj_intervals = {}
 
-        # Calculate metrics
-        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        for batch_data in all_batch_data:
+            batch_size = len(batch_data['task_ids'])
+
+            for i in range(batch_size):
+                task_id = batch_data['task_ids'][i]
+                episode_id = batch_data['episode_ids'][i]
+                window = batch_data['windows'][i]
+                intervals = batch_data['intervals'][i]
+
+                traj_key = (task_id, episode_id)
+
+                # Track maximum frame index seen
+                if traj_key not in traj_max_frames:
+                    traj_max_frames[traj_key] = 0
+                    traj_intervals[traj_key] = intervals
+
+                # Update max frame from this window
+                traj_max_frames[traj_key] = max(traj_max_frames[traj_key], window.end_frame)
+
+                # Also consider interval endpoints
+                if intervals:
+                    max_interval_frame = max([interval.end_frame for interval in intervals])
+                    traj_max_frames[traj_key] = max(traj_max_frames[traj_key], max_interval_frame)
+
+        # Second pass: initialize trajectories with correct sizes
+        trajectories = {}
+        for traj_key, max_frame in traj_max_frames.items():
+            intervals = traj_intervals[traj_key]
+            trajectories[traj_key] = {
+                'timeline_scores': np.zeros(max_frame, dtype=np.float32),
+                'timeline_counts': np.zeros(max_frame, dtype=np.int32),
+                'ground_truth_transitions': [interval.start_frame for interval in intervals[1:]] if len(intervals) > 1 else [],
+                'num_frames': max_frame
+            }
+
+        # Third pass: accumulate predictions
+        for batch_data in all_batch_data:
+            batch_size = len(batch_data['task_ids'])
+
+            for i in range(batch_size):
+                task_id = batch_data['task_ids'][i]
+                episode_id = batch_data['episode_ids'][i]
+                window = batch_data['windows'][i]
+                predictions = batch_data['predictions'][i]  # Shape: (prediction_window_size,)
+
+                traj_key = (task_id, episode_id)
+                traj_data = trajectories[traj_key]
+
+                # Map prediction window back to trajectory frames
+                # Predictions are downsampled by stride, so we need to upsample
+                window_length = window.end_frame - window.begin_frame
+
+                # For distribution losses (softmax outputs that sum to 1):
+                # Scale predictions by window length to maintain relative importance
+                # This prevents longer windows from dominating just because their sum is 1
+                if self.use_distribution_loss:
+                    # Normalize by the number of frames to get per-frame probability mass
+                    predictions = predictions / len(predictions)
+
+                # Interpolate predictions to match window length
+                if len(predictions) < window_length:
+                    # Upsample predictions using nearest neighbor interpolation
+                    indices = np.linspace(0, len(predictions) - 1, window_length).astype(int)
+                    upsampled_predictions = predictions[indices]
+                else:
+                    upsampled_predictions = predictions[:window_length]
+
+                # Add predictions to timeline (accumulate overlapping windows)
+                start_idx = window.begin_frame
+                end_idx = min(window.end_frame, traj_data['num_frames'])
+                valid_length = end_idx - start_idx
+
+                if valid_length > 0:
+                    traj_data['timeline_scores'][start_idx:end_idx] += upsampled_predictions[:valid_length]
+                    traj_data['timeline_counts'][start_idx:end_idx] += 1
+
+        # Average overlapping predictions
+        for traj_key, traj_data in trajectories.items():
+            counts = traj_data['timeline_counts']
+            # Avoid division by zero
+            counts = np.maximum(counts, 1)
+            traj_data['timeline_scores'] = traj_data['timeline_scores'] / counts
+
+            # For distribution losses, renormalize the final scores to maintain interpretability
+            # This makes the maximum score comparable across different trajectories
+            if self.use_distribution_loss:
+                max_score = np.max(traj_data['timeline_scores'])
+                if max_score > 0:
+                    traj_data['timeline_scores'] = traj_data['timeline_scores'] / max_score
+
+        return trajectories
+
+    def _compute_trajectory_metrics(
+        self,
+        trajectories: Dict[Tuple[int, int], Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """Compute trajectory-level metrics and create visualization data.
+
+        Args:
+            trajectories: Dictionary from _accumulate_trajectory_predictions
+
+        Returns:
+            Dictionary with metrics and trajectory plots data
+        """
+        all_tp = 0
+        all_fp = 0
+        all_fn = 0
+        all_tn = 0
+
+        trajectory_plots = []
+
+        for traj_key, traj_data in trajectories.items():
+            task_id, episode_id = traj_key
+            timeline_scores = traj_data['timeline_scores']
+            ground_truth_transitions = traj_data['ground_truth_transitions']
+
+            # Apply threshold to get binary predictions
+            binary_predictions = (timeline_scores > self.classification_threshold).astype(int)
+
+            # Create ground truth binary labels
+            binary_ground_truth = np.zeros_like(timeline_scores, dtype=int)
+            for trans_idx in ground_truth_transitions:
+                if 0 <= trans_idx < len(binary_ground_truth):
+                    binary_ground_truth[trans_idx] = 1
+
+            # Compute confusion matrix for this trajectory
+            tp = np.sum((binary_predictions == 1) & (binary_ground_truth == 1))
+            fp = np.sum((binary_predictions == 1) & (binary_ground_truth == 0))
+            fn = np.sum((binary_predictions == 0) & (binary_ground_truth == 1))
+            tn = np.sum((binary_predictions == 0) & (binary_ground_truth == 0))
+
+            all_tp += tp
+            all_fp += fp
+            all_fn += fn
+            all_tn += tn
+
+            # Store visualization data
+            trajectory_plots.append({
+                'task_id': task_id,
+                'episode_id': episode_id,
+                'timeline_scores': timeline_scores,
+                'ground_truth_transitions': ground_truth_transitions,
+                'threshold': self.classification_threshold
+            })
+
+        # Calculate overall metrics
+        precision = all_tp / (all_tp + all_fp) if (all_tp + all_fp) > 0 else 0.0
+        recall = all_tp / (all_tp + all_fn) if (all_tp + all_fn) > 0 else 0.0
         f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
-        accuracy = (tp + tn) / (tp + fp + fn + tn) if (tp + fp + fn + tn) > 0 else 0.0
+        accuracy = (all_tp + all_tn) / (all_tp + all_fp + all_fn + all_tn) if (all_tp + all_fp + all_fn + all_tn) > 0 else 0.0
 
         return {
             'accuracy': float(accuracy),
             'f1_score': float(f1),
             'precision': float(precision),
-            'recall': float(recall)
+            'recall': float(recall),
+            'trajectory_plots': trajectory_plots
         }
+
+    def _compute_metrics(
+        self,
+        all_predictions: List[np.ndarray],
+        all_labels: List[np.ndarray],
+        all_batch_data: Optional[List[Dict[str, Any]]] = None
+    ) -> Dict[str, Any]:
+        """Compute trajectory-level metrics with visualization data.
+
+        Args:
+            all_predictions: Legacy parameter (kept for backward compatibility)
+            all_labels: Legacy parameter (kept for backward compatibility)
+            all_batch_data: List of batch metadata for trajectory-level computation
+
+        Returns:
+            Dictionary with accuracy, F1 score, and trajectory plots
+        """
+        if all_batch_data is not None:
+            # New trajectory-level metrics
+            trajectories = self._accumulate_trajectory_predictions(all_batch_data)
+            return self._compute_trajectory_metrics(trajectories)
+        else:
+            # Legacy fallback: per-window metrics (for backward compatibility)
+            # This path should not be used in normal training
+            warnings.warn(
+                "Computing per-window metrics. This is deprecated. "
+                "Use trajectory-level metrics instead.",
+                DeprecationWarning
+            )
+
+            predictions = np.concatenate(all_predictions, axis=0)
+            labels = np.concatenate(all_labels, axis=0)
+
+            if predictions.shape != labels.shape:
+                min_len = min(len(predictions), len(labels))
+                predictions = predictions[:min_len]
+                labels = labels[:min_len]
+
+            binary_predictions = (predictions > self.classification_threshold).astype(int)
+            binary_ground_truth = (labels > 0.5).astype(int)
+
+            tp = np.sum((binary_predictions == 1) & (binary_ground_truth == 1))
+            fp = np.sum((binary_predictions == 1) & (binary_ground_truth == 0))
+            fn = np.sum((binary_predictions == 0) & (binary_ground_truth == 1))
+            tn = np.sum((binary_predictions == 0) & (binary_ground_truth == 0))
+
+            precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+            recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+            f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+            accuracy = (tp + tn) / (tp + fp + fn + tn) if (tp + fp + fn + tn) > 0 else 0.0
+
+            return {
+                'accuracy': float(accuracy),
+                'f1_score': float(f1),
+                'precision': float(precision),
+                'recall': float(recall),
+                'trajectory_plots': []
+            }
 
     def _train_step_with_metrics(
         self,
         batch: Dict[str, Any],
         collect_trajectory_data: bool = False
     ) -> tuple:
-        """Execute one training step and return predictions/labels for metrics.
+        """Execute one training step and return batch metadata for trajectory-level metrics.
 
         Returns:
-            Tuple of (loss, trajectory_data, predictions, labels)
+            Tuple of (loss, trajectory_data, batch_metadata)
         """
         # Process batch normally
         loss, trajectory_data = self._process_batch(batch, training=True, collect_trajectory_data=collect_trajectory_data)
 
-        # Extract predictions and labels for metrics
+        # Extract predictions and metadata for trajectory-level metrics
         with torch.no_grad():
             tokenized_actions = batch['proprio_features'].to(self.device)
             dino_features = torch.cat([
@@ -641,21 +851,6 @@ class BoundaryTrainer(Trainer):
                 batch['dino_features']['middle_frame'],
                 batch['dino_features']['end_frame']
             ], dim=1).to(self.device)
-            labels = batch['train_labels'].to(self.device)
-
-            # Crop labels to prediction window (same as in _process_batch)
-            labels = self.crop_labels_fn(
-                labels,
-                self.prediction_window_size,
-                self.prediction_stride
-            )
-
-            # Additional cropping to center window if needed
-            if labels.shape[1] > self.prediction_window_size:
-                center = labels.shape[1] // 2
-                start = center - self.prediction_window_size // 2
-                end = center + self.prediction_window_size // 2
-                labels = labels[:, start:end]
 
             # Get predictions
             logits = self.model(tokenized_actions, None, dino_features)
@@ -666,47 +861,40 @@ class BoundaryTrainer(Trainer):
             else:
                 probabilities = torch.sigmoid(logits)
 
-            # Convert to numpy for metrics
-            predictions_np = probabilities.cpu().detach().numpy().flatten()
-            labels_np = labels.cpu().detach().numpy().flatten()
+            # Convert to numpy
+            predictions_np = probabilities.cpu().detach().numpy()
 
-        return loss, trajectory_data, predictions_np, labels_np
+            # Build batch metadata
+            batch_metadata = {
+                'task_ids': batch['task_id'],
+                'episode_ids': batch['episode_id'],
+                'windows': batch['window'],
+                'predictions': [predictions_np[i] for i in range(len(predictions_np))],
+                'intervals': batch['intervals']
+            }
+
+        return loss, trajectory_data, batch_metadata
 
     def _validation_step_with_metrics(
         self,
         batch: Dict[str, Any],
         collect_trajectory_data: bool = False
     ) -> tuple:
-        """Execute one validation step and return predictions/labels for metrics.
+        """Execute one validation step and return batch metadata for trajectory-level metrics.
 
         Returns:
-            Tuple of (loss, trajectory_data, predictions, labels)
+            Tuple of (loss, trajectory_data, batch_metadata)
         """
         # Process batch normally
         loss, trajectory_data = self._process_batch(batch, training=False, collect_trajectory_data=collect_trajectory_data)
 
-        # Extract predictions and labels for metrics
+        # Extract predictions and metadata for trajectory-level metrics
         tokenized_actions = batch['proprio_features'].to(self.device)
         dino_features = torch.cat([
             batch['dino_features']['begin_frame'],
             batch['dino_features']['middle_frame'],
             batch['dino_features']['end_frame']
         ], dim=1).to(self.device)
-        labels = batch['train_labels'].to(self.device)
-
-        # Crop labels to prediction window (same as in _process_batch)
-        labels = self.crop_labels_fn(
-            labels,
-            self.prediction_window_size,
-            self.prediction_stride
-        )
-
-        # Additional cropping to center window if needed
-        if labels.shape[1] > self.prediction_window_size:
-            center = labels.shape[1] // 2
-            start = center - self.prediction_window_size // 2
-            end = center + self.prediction_window_size // 2
-            labels = labels[:, start:end]
 
         # Get predictions
         logits = self.model(tokenized_actions, None, dino_features)
@@ -717,11 +905,19 @@ class BoundaryTrainer(Trainer):
         else:
             probabilities = torch.sigmoid(logits)
 
-        # Convert to numpy for metrics
-        predictions_np = probabilities.cpu().detach().numpy().flatten()
-        labels_np = labels.cpu().detach().numpy().flatten()
+        # Convert to numpy
+        predictions_np = probabilities.cpu().detach().numpy()
 
-        return loss, trajectory_data, predictions_np, labels_np
+        # Build batch metadata
+        batch_metadata = {
+            'task_ids': batch['task_id'],
+            'episode_ids': batch['episode_id'],
+            'windows': batch['window'],
+            'predictions': [predictions_np[i] for i in range(len(predictions_np))],
+            'intervals': batch['intervals']
+        }
+
+        return loss, trajectory_data, batch_metadata
 
     def _default_crop_labels(
         self,

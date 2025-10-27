@@ -196,6 +196,10 @@ class BoundaryDataset(Dataset):
                 i: dino_stacked[i] for i in range(len(dino_stacked))
             }
 
+            missing_dino = sum(1 for i in range(len(dino_stacked)) if i not in self.dino_features[task_id][episode_id])
+            if missing_dino > 0:
+                print(f"Task {task_id}, Episode {episode_id}: Missing {missing_dino} DINO features")
+
             # Process trajectory into windows
             windows = self._preprocess_trajectory(
                 task_id,
