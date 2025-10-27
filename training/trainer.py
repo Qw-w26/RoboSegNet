@@ -665,14 +665,10 @@ class BoundaryTrainer(Trainer):
                 # Predictions are downsampled by stride, so we need to upsample
                 window_length = window.end_frame - window.begin_frame
 
-                # For distribution losses (softmax outputs that sum to 1):
-                # Scale predictions by window length to maintain relative importance
-                # This prevents longer windows from dominating just because their sum is 1
-                if self.use_distribution_loss:
-                    # Normalize by the number of frames to get per-frame probability mass
-                    predictions = predictions / len(predictions)
-
                 # Interpolate predictions to match window length
+                # For distribution losses, keep softmax probabilities as-is - they already represent
+                # a valid probability distribution. Averaging by overlap counts will handle
+                # combining predictions from multiple windows correctly.
                 if len(predictions) < window_length:
                     # Upsample predictions using nearest neighbor interpolation
                     indices = np.linspace(0, len(predictions) - 1, window_length).astype(int)
@@ -696,12 +692,10 @@ class BoundaryTrainer(Trainer):
             counts = np.maximum(counts, 1)
             traj_data['timeline_scores'] = traj_data['timeline_scores'] / counts
 
-            # For distribution losses, renormalize the final scores to maintain interpretability
-            # This makes the maximum score comparable across different trajectories
-            if self.use_distribution_loss:
-                max_score = np.max(traj_data['timeline_scores'])
-                if max_score > 0:
-                    traj_data['timeline_scores'] = traj_data['timeline_scores'] / max_score
+            # For distribution losses, the averaged softmax probabilities maintain their
+            # probability interpretation in [0, 1] range. No additional normalization needed.
+            # The classification threshold can now be interpreted as "probability > threshold"
+            # consistently across all trajectories.
 
         return trajectories
 

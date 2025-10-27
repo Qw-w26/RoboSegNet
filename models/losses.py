@@ -655,6 +655,7 @@ class FocalDistributionCELoss(nn.Module):
     def __init__(
         self,
         gamma: float = 2.0,
+        alpha: float = 1.0,
         epsilon: float = 1e-8,
         uniform_on_zero: bool = True,
         reduction: str = 'mean'
@@ -664,16 +665,18 @@ class FocalDistributionCELoss(nn.Module):
 
         Args:
             gamma: Focusing parameter (higher = more focus on hard examples)
+            alpha: Weighting factor for the loss (similar to focal loss alpha)
             epsilon: Numerical stability constant
             uniform_on_zero: Use uniform distribution for zero-boundary windows
             reduction: 'mean', 'sum', or 'none'
 
         Example:
-            >>> loss_fn = FocalDistributionCELoss(gamma=2.0)
+            >>> loss_fn = FocalDistributionCELoss(gamma=2.0, alpha=0.75)
             >>> loss = loss_fn(logits, labels)
         """
         super().__init__()
         self.gamma = gamma
+        self.alpha = alpha
         self.epsilon = epsilon
         self.uniform_on_zero = uniform_on_zero
         self.reduction = reduction
@@ -724,9 +727,9 @@ class FocalDistributionCELoss(nn.Module):
         # Focal weight
         focal_weight = (1 - pt) ** self.gamma
 
-        # Cross-entropy with focal weighting
+        # Cross-entropy with focal weighting and alpha
         ce_loss = -(target_dist * log_probs).sum(dim=1)
-        loss = focal_weight * ce_loss
+        loss = self.alpha * focal_weight * ce_loss
 
         if self.reduction == 'mean':
             return loss.mean()

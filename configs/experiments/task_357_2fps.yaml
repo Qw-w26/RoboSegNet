@@ -8,7 +8,7 @@ model:
   token_embed_dim: 128
   dino_feature_dim: 3072
   hidden_dims: [512, 256, 128]
-  prediction_window_size: 180
+  prediction_window_size: 90
   use_proprio: true
   use_dino: true
   transformer_dropout: 0.3
@@ -22,20 +22,20 @@ data:
   cache_dir: ./cache
 
   # Dataset parameters
-  window_size: 180
-  stride: 30
+  window_size: 90
+  stride: 1
   fps: 2.0
   action_dim: 14
 
   # DataLoader
-  batch_size: 512
+  batch_size: 256
   num_workers: 4
   pin_memory: true
 
   # Feature extraction
   vocab_size: 2048
   label_smoother_type: gaussian
-  label_smoother_sigma: 5.0
+  label_smoother_sigma: 3.0
   label_smoother_peak_value: 1.0
 
   # Processing
@@ -44,7 +44,7 @@ data:
 
 training:
   num_epochs: 100
-  learning_rate: 0.001
+  learning_rate: 0.0001
   weight_decay: 0.0001
   optimizer: adam
 
@@ -63,7 +63,7 @@ training:
   loss_gamma: 2.0        # For: soft_focal, focal_bce, focal_dist_ce
 
   # Metrics
-  classification_threshold: 0.3  # Threshold for binary classification (probability > threshold = boundary)
+  classification_threshold: 0.02  # Threshold for binary classification (probability > threshold = boundary)
 
   # Regularization
   gradient_clip_val: null

@@ -289,10 +289,12 @@ class WandBCallback(Callback):
         # Add title and labels
         ax.set_title(f'Task {traj_data["task_id"]}, Episode {traj_data["episode_id"]}')
         ax.set_xlabel('Time Steps')
-        ax.set_ylabel('Values')
+        ax.set_ylabel('Probability')
         ax.legend()
         ax.grid(True, alpha=0.3)
-        ax.set_ylim(-0.1, 1.1)
+        # Auto-scale y-axis to fit the data (ground truth labels may still be normalized differently)
+        max_val = max(np.max(ground_truth), np.max(confidence_scores))
+        ax.set_ylim(-0.01, max_val * 1.1)
 
     def _log_trajectory_timeline_plots(
         self,
@@ -391,8 +393,8 @@ class WandBCallback(Callback):
         # Formatting
         ax.set_title(f'Task {task_id}, Episode {episode_id} - Full Trajectory')
         ax.set_xlabel('Frame Index')
-        ax.set_ylabel('Boundary Score')
-        ax.set_ylim(-0.05, 1.05)
+        ax.set_ylabel('Boundary Probability')
+        ax.set_ylim(-0.05, 0.1)  # Adjusted for true softmax probabilities
         ax.grid(True, alpha=0.3)
 
         # Legend (avoid duplicate labels)
@@ -704,23 +706,27 @@ class EmbeddingVisualizationCallback(Callback):
     """Trajectory embedding visualization callback for training.
 
     Visualizes trajectory embeddings showing temporal progression through
-    embedding space. Plots windows from selected trajectories colored by
-    timestep (window index).
+    embedding space. Plots windows from selected trajectories.
 
-    Based on plot_fast_droid_embeddings.py - shows how embeddings evolve
-    temporally within trajectories.
+    Can visualize different layers of the model and color by different attributes.
 
     Args:
         method: Visualization method ('pca' or 'tsne')
         num_trajectories: Number of trajectories to visualize per split
         max_windows_per_traj: Maximum windows per trajectory (None = all)
+        layer: Which layer to visualize ('input', 'token_embed', 'proprio_encoded',
+               'dino_encoded', 'combined', 'hidden1', 'hidden2', 'hidden3')
+        color_by: How to color points ('timestep' or 'action')
         log_on_save: Log plot when saving best model (default)
         log_on_first: Also log on first epoch
         log_on_last: Also log on last epoch
 
     Example:
+        >>> # Visualize token embeddings colored by action
         >>> callback = EmbeddingVisualizationCallback(
         ...     method='pca',
+        ...     layer='token_embed',
+        ...     color_by='action',
         ...     num_trajectories=3,
         ...     log_on_save=True
         ... )
@@ -731,6 +737,8 @@ class EmbeddingVisualizationCallback(Callback):
         method: str = 'pca',
         num_trajectories: int = 3,
         max_windows_per_traj: Optional[int] = None,
+        layer: str = 'input',
+        color_by: str = 'timestep',
         log_on_save: bool = True,
         log_on_first: bool = True,
         log_on_last: bool = True
@@ -738,6 +746,8 @@ class EmbeddingVisualizationCallback(Callback):
         self.method = method
         self.num_trajectories = num_trajectories
         self.max_windows_per_traj = max_windows_per_traj
+        self.layer = layer
+        self.color_by = color_by
         self.log_on_save = log_on_save
         self.log_on_first = log_on_first
         self.log_on_last = log_on_last
@@ -808,6 +818,7 @@ class EmbeddingVisualizationCallback(Callback):
             return
 
         print(f"\nGenerating trajectory embedding visualization (epoch {epoch+1})...")
+        print(f"  Layer: {self.layer}, Color by: {self.color_by}")
 
         try:
             # Create plots
@@ -818,18 +829,25 @@ class EmbeddingVisualizationCallback(Callback):
                 self.val_dataset,
                 method=self.method,
                 num_trajectories_per_split=self.num_trajectories,
-                max_windows_per_traj=self.max_windows_per_traj
+                max_windows_per_traj=self.max_windows_per_traj,
+                model=trainer.model,
+                layer=self.layer,
+                color_by=self.color_by,
+                device=trainer.device
             )
 
             # Log to wandb
             log_dict = {}
+            layer_suffix = f'_{self.layer}' if self.layer != 'input' else ''
+            color_suffix = f'_{self.color_by}' if self.color_by != 'timestep' else ''
+
             if 'train' in figures:
-                log_dict['embeddings/train_trajectory'] = wandb.Image(figures['train'])
+                log_dict[f'embeddings/train_trajectory{layer_suffix}{color_suffix}'] = wandb.Image(figures['train'])
                 plt.close(figures['train'])
                 print(f"  ✓ Logged training trajectory embedding plot")
 
             if 'val' in figures:
-                log_dict['embeddings/val_trajectory'] = wandb.Image(figures['val'])
+                log_dict[f'embeddings/val_trajectory{layer_suffix}{color_suffix}'] = wandb.Image(figures['val'])
                 plt.close(figures['val'])
                 print(f"  ✓ Logged validation trajectory embedding plot")
 
