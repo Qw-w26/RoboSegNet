@@ -159,7 +159,7 @@ class WandBCallback(Callback):
             'learning_rate': logs.get('learning_rate', 0.0)
         }
 
-        # Add any additional metrics from logs
+        # Add any additional metrics from logs (including IoU, peak distance, etc.)
         for key, value in logs.items():
             if key not in metrics and isinstance(value, (int, float)):
                 metrics[key] = value
@@ -355,7 +355,7 @@ class WandBCallback(Callback):
         plot_data: Dict[str, Any],
         ax: plt.Axes
     ) -> None:
-        """Create a single trajectory timeline plot.
+        """Create a single trajectory timeline plot with detected peaks.
 
         Args:
             plot_data: Dictionary with keys:
@@ -363,7 +363,11 @@ class WandBCallback(Callback):
                 - 'episode_id': Episode ID
                 - 'timeline_scores': Prediction scores for each frame
                 - 'ground_truth_transitions': List of ground truth transition frame indices
+                - 'predicted_peaks': Array of detected peak frame indices
+                - 'peak_scores': Scores at detected peaks
                 - 'threshold': Classification threshold value
+                - 'matched_predictions': List of matched predicted peaks
+                - 'unmatched_predictions': List of unmatched predicted peaks
             ax: Matplotlib axes to plot on
         """
         task_id = plot_data['task_id']
@@ -371,6 +375,10 @@ class WandBCallback(Callback):
         timeline_scores = plot_data['timeline_scores']
         ground_truth_transitions = plot_data['ground_truth_transitions']
         threshold = plot_data['threshold']
+        predicted_peaks = plot_data.get('predicted_peaks', np.array([]))
+        peak_scores = plot_data.get('peak_scores', np.array([]))
+        matched_predictions = plot_data.get('matched_predictions', [])
+        unmatched_predictions = plot_data.get('unmatched_predictions', [])
 
         # Create time axis
         time_axis = np.arange(len(timeline_scores))
@@ -381,26 +389,59 @@ class WandBCallback(Callback):
 
         # Plot threshold line
         ax.axhline(y=threshold, color='orange', linestyle='--', linewidth=1.5,
-                  alpha=0.7, label=f'Threshold ({threshold:.2f})')
+                  alpha=0.7, label=f'Threshold ({threshold:.3f})')
 
         # Plot ground truth transitions as vertical lines
-        for trans_idx in ground_truth_transitions:
+        for i, trans_idx in enumerate(ground_truth_transitions):
             if 0 <= trans_idx < len(timeline_scores):
                 ax.axvline(x=trans_idx, color='red', linestyle='-',
-                          linewidth=2, alpha=0.8, label='GT Transition'
-                          if trans_idx == ground_truth_transitions[0] else '')
+                          linewidth=2, alpha=0.8,
+                          label='GT Transition' if i == 0 else '')
+
+        # Plot detected peaks
+        if len(predicted_peaks) > 0:
+            # Separate matched and unmatched peaks for different visualization
+            matched_mask = np.isin(predicted_peaks, matched_predictions)
+            unmatched_mask = np.isin(predicted_peaks, unmatched_predictions)
+
+            # Plot matched peaks (true positives) in green
+            if np.any(matched_mask):
+                matched_peaks = predicted_peaks[matched_mask]
+                matched_scores = peak_scores[matched_mask]
+                ax.scatter(matched_peaks, matched_scores, color='green', s=100,
+                          marker='o', zorder=5, edgecolors='darkgreen', linewidths=2,
+                          label=f'Detected Peaks (TP: {len(matched_peaks)})')
+
+            # Plot unmatched peaks (false positives) in purple
+            if np.any(unmatched_mask):
+                unmatched_peaks_arr = predicted_peaks[unmatched_mask]
+                unmatched_scores = peak_scores[unmatched_mask]
+                ax.scatter(unmatched_peaks_arr, unmatched_scores, color='purple', s=80,
+                          marker='x', zorder=5, linewidths=2,
+                          label=f'False Positives: {len(unmatched_peaks_arr)}')
+
+        # Calculate metrics for title
+        num_gt = len(ground_truth_transitions)
+        num_matched = len(matched_predictions)
+        num_unmatched = len(unmatched_predictions)
+        num_fn = num_gt - num_matched
 
         # Formatting
-        ax.set_title(f'Task {task_id}, Episode {episode_id} - Full Trajectory')
+        title = f'Task {task_id}, Episode {episode_id} - Full Trajectory\n'
+        title += f'GT: {num_gt}, Detected: {num_matched + num_unmatched} (TP: {num_matched}, FP: {num_unmatched}, FN: {num_fn})'
+        ax.set_title(title, fontsize=9)
         ax.set_xlabel('Frame Index')
         ax.set_ylabel('Boundary Probability')
-        ax.set_ylim(-0.05, 0.1)  # Adjusted for true softmax probabilities
+
+        # Auto-adjust y-limits based on data
+        max_score = np.max(timeline_scores) if len(timeline_scores) > 0 else 0.1
+        ax.set_ylim(-0.01, max(max_score * 1.2, 0.1))
         ax.grid(True, alpha=0.3)
 
         # Legend (avoid duplicate labels)
         handles, labels = ax.get_legend_handles_labels()
         by_label = dict(zip(labels, handles))
-        ax.legend(by_label.values(), by_label.keys(), loc='upper right', fontsize=8)
+        ax.legend(by_label.values(), by_label.keys(), loc='upper right', fontsize=7)
 
 
 class CheckpointCallback(Callback):

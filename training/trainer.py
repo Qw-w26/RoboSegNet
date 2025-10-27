@@ -32,6 +32,7 @@ from torch.optim import Optimizer
 from torch.optim.lr_scheduler import _LRScheduler
 from tqdm import tqdm
 import numpy as np
+from scipy.signal import find_peaks
 
 from training.callbacks import Callback
 
@@ -192,9 +193,17 @@ class Trainer:
                 'train_loss': train_loss,
                 'train_accuracy': train_results.get('accuracy', 0.0),
                 'train_f1': train_results.get('f1_score', 0.0),
+                'train_precision': train_results.get('precision', 0.0),
+                'train_recall': train_results.get('recall', 0.0),
+                'train_avg_iou': train_results.get('avg_iou', 0.0),
+                'train_avg_peak_distance': train_results.get('avg_peak_distance', 0.0),
                 'val_loss': val_loss,
                 'val_accuracy': val_accuracy,
                 'val_f1': val_f1,
+                'val_precision': val_results.get('precision', 0.0),
+                'val_recall': val_results.get('recall', 0.0),
+                'val_avg_iou': val_results.get('avg_iou', 0.0),
+                'val_avg_peak_distance': val_results.get('avg_peak_distance', 0.0),
                 'learning_rate': current_lr,
                 'epoch': epoch
             }
@@ -213,10 +222,10 @@ class Trainer:
             if val_trajectory_plots:
                 logs['val_trajectory_plots'] = val_trajectory_plots
 
-            # Print epoch summary
-            print(f"Train Loss: {train_loss:.4f}, Acc: {train_results.get('accuracy', 0.0):.4f}, F1: {train_results.get('f1_score', 0.0):.4f}", end='')
+            # Print epoch summary with peak detection metrics
+            print(f"Train Loss: {train_loss:.4f}, P: {train_results.get('precision', 0.0):.3f}, R: {train_results.get('recall', 0.0):.3f}, F1: {train_results.get('f1_score', 0.0):.3f}, IoU: {train_results.get('avg_iou', 0.0):.3f}", end='')
             if val_loss is not None:
-                print(f" | Val Loss: {val_loss:.4f}, Acc: {val_accuracy:.4f}, F1: {val_f1:.4f}", end='')
+                print(f" | Val Loss: {val_loss:.4f}, P: {val_results.get('precision', 0.0):.3f}, R: {val_results.get('recall', 0.0):.3f}, F1: {val_f1:.3f}, IoU: {val_results.get('avg_iou', 0.0):.3f}", end='')
             print(f" | LR: {current_lr:.6f}")
 
             # Callback: on_epoch_end
@@ -703,7 +712,7 @@ class BoundaryTrainer(Trainer):
         self,
         trajectories: Dict[Tuple[int, int], Dict[str, Any]]
     ) -> Dict[str, Any]:
-        """Compute trajectory-level metrics and create visualization data.
+        """Compute trajectory-level metrics with peak detection and IoU comparison.
 
         Args:
             trajectories: Dictionary from _accumulate_trajectory_predictions
@@ -714,8 +723,9 @@ class BoundaryTrainer(Trainer):
         all_tp = 0
         all_fp = 0
         all_fn = 0
-        all_tn = 0
 
+        all_ious = []
+        all_peak_distances = []
         trajectory_plots = []
 
         for traj_key, traj_data in trajectories.items():
@@ -723,46 +733,104 @@ class BoundaryTrainer(Trainer):
             timeline_scores = traj_data['timeline_scores']
             ground_truth_transitions = traj_data['ground_truth_transitions']
 
-            # Apply threshold to get binary predictions
-            binary_predictions = (timeline_scores > self.classification_threshold).astype(int)
+            # Use peak detection instead of threshold-based approach
+            # Find peaks with reasonable parameters for keyframe detection
+            # height: minimum peak height (use threshold as minimum)
+            # distance: minimum frames between peaks (at 2fps, ~5 frames = 2.5 seconds)
+            # prominence: how much the peak stands out (important for distribution losses)
+            predicted_peaks, peak_properties = find_peaks(
+                timeline_scores,
+                height=self.classification_threshold,
+                distance=5,  # Minimum 5 frames between boundaries
+                prominence=0.005  # Peak must stand out by 0.5% probability
+            )
 
-            # Create ground truth binary labels
-            binary_ground_truth = np.zeros_like(timeline_scores, dtype=int)
-            for trans_idx in ground_truth_transitions:
-                if 0 <= trans_idx < len(binary_ground_truth):
-                    binary_ground_truth[trans_idx] = 1
+            # Get peak scores for visualization
+            peak_scores = timeline_scores[predicted_peaks] if len(predicted_peaks) > 0 else np.array([])
 
-            # Compute confusion matrix for this trajectory
-            tp = np.sum((binary_predictions == 1) & (binary_ground_truth == 1))
-            fp = np.sum((binary_predictions == 1) & (binary_ground_truth == 0))
-            fn = np.sum((binary_predictions == 0) & (binary_ground_truth == 1))
-            tn = np.sum((binary_predictions == 0) & (binary_ground_truth == 0))
+            # Compute IoU-based metrics for each ground truth transition
+            # For each GT transition, find closest predicted peak within a tolerance window
+            tolerance = 10  # frames (at 2fps, this is 5 seconds)
+
+            matched_gt = set()
+            matched_pred = set()
+            ious = []
+            distances = []
+
+            # Match predictions to ground truth
+            for gt_idx in ground_truth_transitions:
+                best_iou = 0.0
+                best_distance = float('inf')
+                best_pred_idx = None
+
+                for i, pred_idx in enumerate(predicted_peaks):
+                    distance = abs(pred_idx - gt_idx)
+
+                    # Compute IoU using a window around each transition
+                    # Define windows of fixed size around GT and prediction
+                    window_size = 5  # +/- 5 frames
+                    gt_window = set(range(max(0, gt_idx - window_size),
+                                         min(len(timeline_scores), gt_idx + window_size + 1)))
+                    pred_window = set(range(max(0, pred_idx - window_size),
+                                           min(len(timeline_scores), pred_idx + window_size + 1)))
+
+                    intersection = len(gt_window & pred_window)
+                    union = len(gt_window | pred_window)
+                    iou = intersection / union if union > 0 else 0.0
+
+                    if distance < tolerance and distance < best_distance:
+                        best_distance = distance
+                        best_iou = iou
+                        best_pred_idx = i
+
+                if best_pred_idx is not None:
+                    matched_gt.add(gt_idx)
+                    matched_pred.add(best_pred_idx)
+                    ious.append(best_iou)
+                    distances.append(best_distance)
+
+            # Compute TP, FP, FN based on matches
+            tp = len(matched_gt)
+            fp = len(predicted_peaks) - len(matched_pred)
+            fn = len(ground_truth_transitions) - len(matched_gt)
 
             all_tp += tp
             all_fp += fp
             all_fn += fn
-            all_tn += tn
+            all_ious.extend(ious)
+            all_peak_distances.extend(distances)
 
-            # Store visualization data
+            # Store visualization data with predicted peaks
             trajectory_plots.append({
                 'task_id': task_id,
                 'episode_id': episode_id,
                 'timeline_scores': timeline_scores,
                 'ground_truth_transitions': ground_truth_transitions,
-                'threshold': self.classification_threshold
+                'predicted_peaks': predicted_peaks,
+                'peak_scores': peak_scores,
+                'threshold': self.classification_threshold,
+                'matched_predictions': [predicted_peaks[i] for i in matched_pred],
+                'unmatched_predictions': [predicted_peaks[i] for i in range(len(predicted_peaks)) if i not in matched_pred]
             })
 
         # Calculate overall metrics
         precision = all_tp / (all_tp + all_fp) if (all_tp + all_fp) > 0 else 0.0
         recall = all_tp / (all_tp + all_fn) if (all_tp + all_fn) > 0 else 0.0
         f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
-        accuracy = (all_tp + all_tn) / (all_tp + all_fp + all_fn + all_tn) if (all_tp + all_fp + all_fn + all_tn) > 0 else 0.0
+
+        # Compute average IoU and distance for matched transitions
+        avg_iou = np.mean(all_ious) if len(all_ious) > 0 else 0.0
+        avg_distance = np.mean(all_peak_distances) if len(all_peak_distances) > 0 else 0.0
 
         return {
-            'accuracy': float(accuracy),
+            'accuracy': float(precision),  # For keyframe detection, precision is more meaningful than frame-level accuracy
             'f1_score': float(f1),
             'precision': float(precision),
             'recall': float(recall),
+            'avg_iou': float(avg_iou),
+            'avg_peak_distance': float(avg_distance),
+            'num_predicted_peaks': int(all_tp + all_fp),
+            'num_gt_transitions': int(all_tp + all_fn),
             'trajectory_plots': trajectory_plots
         }
 
