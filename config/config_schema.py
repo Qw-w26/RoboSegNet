@@ -145,6 +145,11 @@ class TrainingConfig:
         # Metrics
         classification_threshold: Threshold for binary classification (default: 0.5)
 
+        # Evaluation parameters (time-based, auto-scaled by freq_multiplier)
+        peak_detection_distance: Minimum time (seconds) between detected peaks
+        matching_tolerance: Maximum time (seconds) for matching pred to GT (not used if matching at DINO freq)
+        iou_window_size: Window size (seconds) around transitions for IoU calculation
+
         # Regularization
         gradient_clip_val: Gradient clipping value (None to disable)
         use_amp: Use automatic mixed precision
@@ -185,6 +190,11 @@ class TrainingConfig:
 
     # Metrics
     classification_threshold: float = 0.5
+
+    # Evaluation parameters (time-based, will be scaled by freq_multiplier)
+    peak_detection_distance: float = 5.0  # Minimum time (seconds) between detected peaks
+    matching_tolerance: float = 1.0       # Maximum time (seconds) for matching (not used if matching at DINO freq)
+    iou_window_size: float = 5.0          # Window size (seconds) around transitions for IoU
 
     # Regularization
     gradient_clip_val: Optional[float] = None

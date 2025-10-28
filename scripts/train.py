@@ -318,7 +318,11 @@ def main():
         prediction_stride=config.data.stride,
         prediction_window_size=config.model.prediction_window_size,
         classification_threshold=config.training.classification_threshold,
-        use_distribution_loss=use_distribution_loss
+        use_distribution_loss=use_distribution_loss,
+        freq_multiplier=train_dataset.freq_multiplier,  # Get from dataset
+        peak_detection_distance=config.training.peak_detection_distance,
+        matching_tolerance=config.training.matching_tolerance,
+        iou_window_size=config.training.iou_window_size
     )
 
     # Train

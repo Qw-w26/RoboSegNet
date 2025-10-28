@@ -444,7 +444,11 @@ class BoundaryTrainer(Trainer):
         prediction_window_size: int = 18,
         crop_labels_fn: Optional[Callable] = None,
         classification_threshold: float = 0.5,
-        use_distribution_loss: bool = False
+        use_distribution_loss: bool = False,
+        freq_multiplier: int = 1,
+        peak_detection_distance: float = 5.0,
+        matching_tolerance: float = 1.0,
+        iou_window_size: float = 5.0
     ):
         super().__init__(
             model=model,
@@ -460,9 +464,22 @@ class BoundaryTrainer(Trainer):
         self.crop_labels_fn = crop_labels_fn or self._default_crop_labels
         self.classification_threshold = classification_threshold
         self.use_distribution_loss = use_distribution_loss
+        self.freq_multiplier = freq_multiplier  # For mapping window fps to proprio fps
+
+        # Evaluation parameters (in seconds at window_fps, will be scaled to proprio_fps)
+        self.peak_detection_distance = peak_detection_distance  # Minimum seconds between peaks
+        self.matching_tolerance = matching_tolerance  # Maximum seconds for matching pred to GT
+        self.iou_window_size = iou_window_size  # Window size in seconds for IoU calculation
+
+        if freq_multiplier > 1:
+            print(f"Frequency multiplier: {freq_multiplier}x (window frames will be mapped to timeline)")
 
         print(f"Classification threshold: {self.classification_threshold}")
         print(f"Using distribution loss: {self.use_distribution_loss}")
+        print(f"Evaluation parameters (will be scaled by freq_multiplier):")
+        print(f"  Peak detection distance: {self.peak_detection_distance}s")
+        print(f"  Matching tolerance: {self.matching_tolerance}s")
+        print(f"  IoU window size: ±{self.iou_window_size}s")
 
     def _train_epoch(
         self,
@@ -619,6 +636,8 @@ class BoundaryTrainer(Trainer):
                 - 'num_frames': Total number of frames in trajectory
         """
         # First pass: determine trajectory lengths
+        # NOTE: Timeline is at proprio fps (30 Hz), not window fps (2 Hz)
+        # Intervals are at proprio fps, so we use them to determine timeline size
         traj_max_frames = {}
         traj_intervals = {}
 
@@ -638,10 +657,7 @@ class BoundaryTrainer(Trainer):
                     traj_max_frames[traj_key] = 0
                     traj_intervals[traj_key] = intervals
 
-                # Update max frame from this window
-                traj_max_frames[traj_key] = max(traj_max_frames[traj_key], window.end_frame)
-
-                # Also consider interval endpoints
+                # Use interval endpoints to determine timeline size (at proprio fps)
                 if intervals:
                     max_interval_frame = max([interval.end_frame for interval in intervals])
                     traj_max_frames[traj_key] = max(traj_max_frames[traj_key], max_interval_frame)
@@ -670,29 +686,40 @@ class BoundaryTrainer(Trainer):
                 traj_key = (task_id, episode_id)
                 traj_data = trajectories[traj_key]
 
-                # Map prediction window back to trajectory frames
-                # Predictions are downsampled by stride, so we need to upsample
-                window_length = window.end_frame - window.begin_frame
+                # Map window frames from window_fps to proprio_fps
+                # window.begin_frame and window.end_frame are at window_fps (e.g., 2 Hz)
+                # timeline is at proprio_fps (e.g., 30 Hz)
+                start_idx_window_fps = window.begin_frame
+                end_idx_window_fps = window.end_frame
 
-                # Interpolate predictions to match window length
-                # For distribution losses, keep softmax probabilities as-is - they already represent
-                # a valid probability distribution. Averaging by overlap counts will handle
-                # combining predictions from multiple windows correctly.
-                if len(predictions) < window_length:
-                    # Upsample predictions using nearest neighbor interpolation
-                    indices = np.linspace(0, len(predictions) - 1, window_length).astype(int)
-                    upsampled_predictions = predictions[indices]
+                # Map to proprio fps
+                start_idx_proprio_fps = start_idx_window_fps * self.freq_multiplier
+                end_idx_proprio_fps = end_idx_window_fps * self.freq_multiplier
+
+                # Window length at proprio fps
+                window_length_proprio = end_idx_proprio_fps - start_idx_proprio_fps
+
+                # Upsample predictions from window_fps to proprio_fps
+                # predictions has shape (prediction_window_size,) at window_fps
+                # We need to upsample to window_length_proprio at proprio_fps
+                if len(predictions) < window_length_proprio:
+                    # Upsample predictions using linear interpolation
+                    indices = np.linspace(0, len(predictions) - 1, window_length_proprio)
+                    upsampled_predictions = np.interp(
+                        indices,
+                        np.arange(len(predictions)),
+                        predictions
+                    )
                 else:
-                    upsampled_predictions = predictions[:window_length]
+                    upsampled_predictions = predictions[:window_length_proprio]
 
                 # Add predictions to timeline (accumulate overlapping windows)
-                start_idx = window.begin_frame
-                end_idx = min(window.end_frame, traj_data['num_frames'])
-                valid_length = end_idx - start_idx
+                end_idx_clipped = min(end_idx_proprio_fps, traj_data['num_frames'])
+                valid_length = end_idx_clipped - start_idx_proprio_fps
 
-                if valid_length > 0:
-                    traj_data['timeline_scores'][start_idx:end_idx] += upsampled_predictions[:valid_length]
-                    traj_data['timeline_counts'][start_idx:end_idx] += 1
+                if valid_length > 0 and start_idx_proprio_fps < traj_data['num_frames']:
+                    traj_data['timeline_scores'][start_idx_proprio_fps:end_idx_clipped] += upsampled_predictions[:valid_length]
+                    traj_data['timeline_counts'][start_idx_proprio_fps:end_idx_clipped] += 1
 
         # Average overlapping predictions
         for traj_key, traj_data in trajectories.items():
@@ -735,59 +762,95 @@ class BoundaryTrainer(Trainer):
 
             # Use peak detection instead of threshold-based approach
             # Find peaks with reasonable parameters for keyframe detection
-            # height: minimum peak height (use threshold as minimum)
-            # distance: minimum frames between peaks (at 2fps, ~5 frames = 2.5 seconds)
-            # prominence: how much the peak stands out (important for distribution losses)
+            # NOTE: Timeline is at proprio_fps, convert time-based parameters to frames
+
+            # Convert configurable parameters (in seconds) to frames at proprio_fps
+            # proprio_fps ≈ window_fps * freq_multiplier
+            # So: frames = seconds * window_fps * freq_multiplier
+
+            # For simplicity, we directly compute frames from seconds knowing the timeline frequency
+            # peak_detection_distance: minimum time between detected peaks (in seconds)
+            # This is converted to frames assuming window_fps as the base frequency
+            peak_distance = max(1, int(self.peak_detection_distance * self.freq_multiplier))
+
             predicted_peaks, peak_properties = find_peaks(
                 timeline_scores,
                 height=self.classification_threshold,
-                distance=5,  # Minimum 5 frames between boundaries
-                prominence=0.005  # Peak must stand out by 0.5% probability
+                distance=peak_distance,  # Minimum frames between boundaries at proprio fps
+                prominence=0.01  # Peak must stand out by 1% probability
             )
 
             # Get peak scores for visualization
             peak_scores = timeline_scores[predicted_peaks] if len(predicted_peaks) > 0 else np.array([])
 
-            # Compute IoU-based metrics for each ground truth transition
-            # For each GT transition, find closest predicted peak within a tolerance window
-            tolerance = 10  # frames (at 2fps, this is 5 seconds)
+            # Match predictions to ground truth at DINO frequency (no tolerance)
+            # Map both predictions and GT from proprio_fps to window_fps
+            # Two predictions/GTs match if they map to the same window frame
 
             matched_gt = set()
             matched_pred = set()
             ious = []
             distances = []
 
-            # Match predictions to ground truth
+            # Map GT transitions from proprio_fps to window_fps
+            gt_at_window_fps = {}
             for gt_idx in ground_truth_transitions:
-                best_iou = 0.0
-                best_distance = float('inf')
-                best_pred_idx = None
+                gt_window_frame = gt_idx // self.freq_multiplier
+                if gt_window_frame not in gt_at_window_fps:
+                    gt_at_window_fps[gt_window_frame] = []
+                gt_at_window_fps[gt_window_frame].append(gt_idx)
 
-                for i, pred_idx in enumerate(predicted_peaks):
-                    distance = abs(pred_idx - gt_idx)
+            # Map predicted peaks from proprio_fps to window_fps
+            pred_at_window_fps = {}
+            for i, pred_idx in enumerate(predicted_peaks):
+                pred_window_frame = pred_idx // self.freq_multiplier
+                if pred_window_frame not in pred_at_window_fps:
+                    pred_at_window_fps[pred_window_frame] = []
+                pred_at_window_fps[pred_window_frame].append((i, pred_idx))
 
-                    # Compute IoU using a window around each transition
-                    # Define windows of fixed size around GT and prediction
-                    window_size = 5  # +/- 5 frames
-                    gt_window = set(range(max(0, gt_idx - window_size),
-                                         min(len(timeline_scores), gt_idx + window_size + 1)))
-                    pred_window = set(range(max(0, pred_idx - window_size),
-                                           min(len(timeline_scores), pred_idx + window_size + 1)))
+            # Match at window_fps: if pred and GT are in same window frame, they match
+            # iou_window_size: window size (in seconds) around each transition for IoU calculation
+            iou_window_frames = max(1, int(self.iou_window_size * self.freq_multiplier))
 
-                    intersection = len(gt_window & pred_window)
-                    union = len(gt_window | pred_window)
-                    iou = intersection / union if union > 0 else 0.0
+            for window_frame, gt_indices in gt_at_window_fps.items():
+                # Check if there's a prediction at this window frame
+                if window_frame in pred_at_window_fps:
+                    # Match: take the first (or closest) prediction at this window frame
+                    for gt_idx in gt_indices:
+                        if gt_idx in matched_gt:
+                            continue  # Already matched
 
-                    if distance < tolerance and distance < best_distance:
-                        best_distance = distance
-                        best_iou = iou
-                        best_pred_idx = i
+                        # Find best matching prediction at this window frame
+                        best_iou = 0.0
+                        best_distance = float('inf')
+                        best_pred_idx = None
 
-                if best_pred_idx is not None:
-                    matched_gt.add(gt_idx)
-                    matched_pred.add(best_pred_idx)
-                    ious.append(best_iou)
-                    distances.append(best_distance)
+                        for pred_i, pred_idx in pred_at_window_fps[window_frame]:
+                            if pred_i in matched_pred:
+                                continue  # Already matched
+
+                            distance = abs(pred_idx - gt_idx)
+
+                            # Compute IoU using a window around each transition
+                            gt_window = set(range(max(0, gt_idx - iou_window_frames),
+                                                 min(len(timeline_scores), gt_idx + iou_window_frames + 1)))
+                            pred_window = set(range(max(0, pred_idx - iou_window_frames),
+                                                   min(len(timeline_scores), pred_idx + iou_window_frames + 1)))
+
+                            intersection = len(gt_window & pred_window)
+                            union = len(gt_window | pred_window)
+                            iou = intersection / union if union > 0 else 0.0
+
+                            if distance < best_distance:
+                                best_distance = distance
+                                best_iou = iou
+                                best_pred_idx = pred_i
+
+                        if best_pred_idx is not None:
+                            matched_gt.add(gt_idx)
+                            matched_pred.add(best_pred_idx)
+                            ious.append(best_iou)
+                            distances.append(best_distance)
 
             # Compute TP, FP, FN based on matches
             tp = len(matched_gt)

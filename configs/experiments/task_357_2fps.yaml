@@ -8,7 +8,7 @@ model:
   token_embed_dim: 128
   dino_feature_dim: 3072
   hidden_dims: [512, 256, 128]
-  prediction_window_size: 90
+  prediction_window_size: 18  # Updated to match window_size
   use_proprio: true
   use_dino: true
   transformer_dropout: 0.3
@@ -22,9 +22,11 @@ data:
   cache_dir: ./cache
 
   # Dataset parameters
-  window_size: 90
-  stride: 1
-  fps: 2.0
+  # Note: window_size and stride are at window_fps (DINO frequency)
+  # Proprio is extracted at full 30 Hz within each window (auto-detected)
+  window_size: 18  # Frames at window_fps (2 Hz) - reduced from 90 to fit 70 DINO samples
+  stride: 1        # Frames at window_fps (2 Hz)
+  fps: 2.0         # Window FPS (matches DINO extraction rate)
   action_dim: 14
 
   # DataLoader
@@ -35,7 +37,7 @@ data:
   # Feature extraction
   vocab_size: 2048
   label_smoother_type: gaussian
-  label_smoother_sigma: 3.0
+  label_smoother_sigma: 2.0
   label_smoother_peak_value: 1.0
 
   # Processing
@@ -55,7 +57,7 @@ training:
   # Loss function: dist_ce | kl_div | js_div | focal_dist_ce | bce | weighted_bce | soft_focal | focal_bce | mse
   # RECOMMENDED: dist_ce (Distribution Cross-Entropy) - treats window as probability distribution
   # LEGACY: bce (Binary Cross-Entropy) - treats each frame independently (not ideal for this task)
-  loss_type: dist_ce
+  loss_type: kl_div
 
   # Loss hyperparameters (only applicable to certain loss types)
   loss_pos_weight: 10.0  # For: bce, weighted_bce
@@ -63,7 +65,12 @@ training:
   loss_gamma: 2.0        # For: soft_focal, focal_bce, focal_dist_ce
 
   # Metrics
-  classification_threshold: 0.01  # Threshold for binary classification (probability > threshold = boundary)
+  classification_threshold: 0.05  # Threshold for binary classification (probability > threshold = boundary)
+
+  # Evaluation parameters (in seconds, will be scaled to frames at proprio_fps)
+  peak_detection_distance: 1.0  # Minimum time (seconds) between detected peaks
+  matching_tolerance: 0.5       # NOT USED - matching is done at DINO frequency with no tolerance
+  iou_window_size: 0.5          # Window size (seconds) around each transition for IoU calculation
 
   # Regularization
   gradient_clip_val: null

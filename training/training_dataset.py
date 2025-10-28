@@ -118,11 +118,58 @@ class BoundaryDataset(Dataset):
         self.config = config
         self.data_points = []
 
+        # Detect actual proprioception frequency from first trajectory
+        # config.fps is the window/DINO fps (e.g., 2 Hz)
+        # actual_proprio_fps is the raw proprio frequency (e.g., 30 Hz)
+        self.window_fps = config.fps  # For window creation and DINO indexing
+
+        if len(trajectories) > 0:
+            timestamps = trajectories[0].proprio.timestamps
+            # Convert timestamps to seconds if needed
+            if timestamps[0] > 1e12:  # Nanoseconds
+                timestamps = timestamps / 1e9
+            elif timestamps[0] > 1e9:  # Microseconds
+                timestamps = timestamps / 1e6
+            elif timestamps[0] > 1e6:  # Milliseconds
+                timestamps = timestamps / 1e3
+
+            dt = np.diff(timestamps)
+            median_dt = np.median(dt)
+            self.proprio_fps = float(1.0 / median_dt) if median_dt > 0 else 30.0
+            print(f"Detected proprioception frequency: {self.proprio_fps:.2f} Hz")
+        else:
+            self.proprio_fps = config.fps  # Fallback
+            print(f"Warning: No trajectories to detect frequency, using config fps: {self.proprio_fps} Hz")
+
+        # Calculate frequency multiplier for mapping window indices to proprio indices
+        self.freq_multiplier = int(round(self.proprio_fps / self.window_fps))
+        print(f"Window fps: {self.window_fps} Hz, Proprio fps: {self.proprio_fps:.2f} Hz, Multiplier: {self.freq_multiplier}x")
+
+        # Calculate actual time covered by window
+        time_window_s = config.window_size / self.window_fps
+        print(f"Time window: {config.window_size} frames at {self.window_fps} Hz = {time_window_s:.1f} seconds")
+
+        # Calculate frame frequency for tokenizer (round to nearest integer)
+        # The tokenizer requires that window_size = time_s * frame_frequency
+        tokenizer_frame_freq = int(round(self.proprio_fps))
+        print(f"Tokenizer frame frequency: {tokenizer_frame_freq} Hz (rounded from {self.proprio_fps:.2f} Hz)")
+
+        # Calculate expected proprio samples per window that's compatible with tokenizer
+        # Must be: window_size = time_s * frame_frequency (exactly)
+        self.proprio_window_size = int(time_window_s * tokenizer_frame_freq)
+        print(f"Proprio samples per window: {self.proprio_window_size} ({time_window_s:.1f}s * {tokenizer_frame_freq}Hz)")
+
+        # Verify this is valid
+        if self.proprio_window_size % tokenizer_frame_freq != 0:
+            # Adjust to be a multiple
+            self.proprio_window_size = (self.proprio_window_size // tokenizer_frame_freq) * tokenizer_frame_freq
+            print(f"  Adjusted to nearest multiple: {self.proprio_window_size}")
+
         # Initialize feature extractors
         self.proprio_embedder = DroidTokenEmbedder(
             config=FastTokenizerConfig(
-                time_s=config.window_size / config.fps,
-                frame_frequency=config.fps,
+                time_s=time_window_s,  # Time in seconds
+                frame_frequency=tokenizer_frame_freq,  # Use rounded frequency
                 action_dim=config.action_dim,
                 vocab_size=config.vocab_size
             )
@@ -272,11 +319,13 @@ class BoundaryDataset(Dataset):
         intervals: List[Any]
     ) -> List[Dict[str, Any]]:
         """Preprocess trajectory into windowed samples."""
-        # Get windows
-        windows = self._make_windows(len(proprio_data['timestamps']))
-
-        # Get DINO features
+        # Get DINO features first
         dino_features = self.dino_features.get(task_id, {}).get(episode_id, {})
+
+        # Create windows at DINO fps (window_fps), not at proprio fps
+        # The number of DINO samples determines how many windows we can create
+        num_dino_samples = len(dino_features)
+        windows = self._make_windows(num_dino_samples)
 
         # Detect DINO feature dimension from first available feature
         dino_dim = 1024  # Default to DINOv3
@@ -314,18 +363,30 @@ class BoundaryDataset(Dataset):
         proprio_data: Dict,
         windows: List[Window]
     ) -> Dict[int, np.ndarray]:
-        """Extract proprioceptive features for windows."""
-        begin_frames = [window.begin_frame for window in windows]
+        """Extract proprioceptive features for windows.
 
-        # FIXED: Pass joint_positions numpy array, not the full dict
-        # embed_frames expects: (joint_positions: np.ndarray, frames: List[int], window_size: int)
+        Windows are at window_fps (DINO fps, e.g., 2 Hz), but we need to extract
+        proprio data at its native frequency (e.g., 30 Hz). We map window indices
+        by multiplying by the frequency multiplier.
+        """
+        # Window begin_frames are at window_fps, map to proprio_fps
+        begin_frames_at_window_fps = [window.begin_frame for window in windows]
+        begin_frames_at_proprio_fps = [f * self.freq_multiplier for f in begin_frames_at_window_fps]
+
+        # Extract proprio with mapped window size
+        # self.proprio_window_size is window_size * freq_multiplier
         features = self.proprio_embedder.embed_frames(
-            proprio_data['joint_positions'],  # Pass numpy array, not dict
-            begin_frames,
-            self.config.window_size
+            proprio_data['joint_positions'],  # Proprio at native frequency
+            begin_frames_at_proprio_fps,  # Mapped start indices
+            self.proprio_window_size  # Mapped window size
         )
 
-        return features
+        # Return with original window indices as keys (at window_fps)
+        # This allows DINO features and proprio features to align
+        return {
+            begin_frames_at_window_fps[i]: features[begin_frames_at_proprio_fps[i]]
+            for i in range(len(windows))
+        }
 
     def _make_train_labels(
         self,
@@ -333,25 +394,58 @@ class BoundaryDataset(Dataset):
         intervals: List[Any],
         windows: List[Window]
     ) -> Dict[int, np.ndarray]:
-        """Create training labels with smoothing."""
+        """Create training labels with smoothing.
+
+        Labels should be at window_fps (DINO fps) to match model predictions,
+        not at proprio_fps. Each label represents the boundary probability at
+        a window frame (2 Hz), not at every proprio sample.
+        """
         # Extract boundary frame indices (start of each interval except first)
+        # These are at the original proprio frequency
         transition_indices = [interval.start_frame for interval in intervals[1:]]
 
         # Handle case with no transitions
         if len(transition_indices) == 0:
             return {
-                window.begin_frame: np.zeros(window.end_frame - window.begin_frame)
+                window.begin_frame: np.zeros(self.config.window_size)
                 for window in windows
             }
 
-        # Apply label smoothing
+        # Apply label smoothing (labels are at proprio frequency)
         smoothed_labels = self.label_smoother.smooth(timestamps, transition_indices)
 
         # Extract labels for each window
-        return {
-            window.begin_frame: smoothed_labels[window.begin_frame:window.end_frame]
-            for window in windows
-        }
+        # Downsample from proprio_fps to window_fps
+        labels_dict = {}
+        for window in windows:
+            # Map window frames to proprio frames
+            begin_proprio = window.begin_frame * self.freq_multiplier
+            end_proprio = begin_proprio + self.proprio_window_size
+
+            # Extract labels at proprio frequency
+            if end_proprio <= len(smoothed_labels):
+                labels_at_proprio_fps = smoothed_labels[begin_proprio:end_proprio]
+            else:
+                # Pad if out of bounds
+                available = smoothed_labels[begin_proprio:]
+                padded = np.zeros(self.proprio_window_size)
+                padded[:len(available)] = available
+                labels_at_proprio_fps = padded
+
+            # Downsample to window_fps by taking every freq_multiplier-th sample
+            # This gives us window_size labels (one per window frame at 2 Hz)
+            labels_at_window_fps = labels_at_proprio_fps[::self.freq_multiplier]
+
+            # Ensure we have exactly window_size labels
+            if len(labels_at_window_fps) < self.config.window_size:
+                # Pad if needed
+                padded = np.zeros(self.config.window_size)
+                padded[:len(labels_at_window_fps)] = labels_at_window_fps
+                labels_dict[window.begin_frame] = padded
+            else:
+                labels_dict[window.begin_frame] = labels_at_window_fps[:self.config.window_size]
+
+        return labels_dict
 
 
 def collate_dict(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
