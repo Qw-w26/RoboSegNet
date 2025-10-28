@@ -447,7 +447,6 @@ class BoundaryTrainer(Trainer):
         use_distribution_loss: bool = False,
         freq_multiplier: int = 1,
         peak_detection_distance: float = 5.0,
-        matching_tolerance: float = 1.0,
         iou_window_size: float = 5.0
     ):
         super().__init__(
@@ -466,9 +465,8 @@ class BoundaryTrainer(Trainer):
         self.use_distribution_loss = use_distribution_loss
         self.freq_multiplier = freq_multiplier  # For mapping window fps to proprio fps
 
-        # Evaluation parameters (in seconds at window_fps, will be scaled to proprio_fps)
+        # Evaluation parameters (in seconds, will be scaled to frames at proprio_fps)
         self.peak_detection_distance = peak_detection_distance  # Minimum seconds between peaks
-        self.matching_tolerance = matching_tolerance  # Maximum seconds for matching pred to GT
         self.iou_window_size = iou_window_size  # Window size in seconds for IoU calculation
 
         if freq_multiplier > 1:
@@ -478,7 +476,7 @@ class BoundaryTrainer(Trainer):
         print(f"Using distribution loss: {self.use_distribution_loss}")
         print(f"Evaluation parameters (will be scaled by freq_multiplier):")
         print(f"  Peak detection distance: {self.peak_detection_distance}s")
-        print(f"  Matching tolerance: {self.matching_tolerance}s")
+        print(f"  Matching: At DINO frequency (no tolerance)")
         print(f"  IoU window size: ±{self.iou_window_size}s")
 
     def _train_epoch(

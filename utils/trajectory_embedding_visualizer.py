@@ -17,12 +17,14 @@ from pathlib import Path
 import torch
 
 
-def _get_action_label_for_window(sample: Dict[str, Any]) -> str:
+def _get_action_label_for_window(sample: Dict[str, Any], freq_multiplier: int = 1) -> str:
     """
     Determine the action label for a window based on its frame position.
 
     Args:
         sample: Dataset sample containing 'window' and 'intervals'
+        freq_multiplier: Frequency multiplier to convert window frames to proprio frames
+                        (e.g., if window is at 2Hz and intervals at 30Hz, multiplier is 15)
 
     Returns:
         Action skill label (e.g., 'Pick', 'Place', 'Move')
@@ -34,10 +36,12 @@ def _get_action_label_for_window(sample: Dict[str, Any]) -> str:
         return 'Unknown'
 
     # Find which interval this window's middle frame belongs to
-    middle_frame = window.middle_frame
+    # Window frames are at window_fps, but intervals are at proprio_fps
+    # So we need to scale the window frame to proprio_fps
+    middle_frame_proprio = window.middle_frame * freq_multiplier
 
     for interval in intervals:
-        if interval.start_frame <= middle_frame < interval.end_frame:
+        if interval.start_frame <= middle_frame_proprio < interval.end_frame:
             # Return the skill name if available, otherwise action_text
             return interval.skill if interval.skill else interval.action_text
 
@@ -182,6 +186,9 @@ def extract_trajectory_windows_embeddings(
     if max_windows:
         trajectory_samples = trajectory_samples[:max_windows]
 
+    # Get frequency multiplier from dataset (for converting window frames to proprio frames)
+    freq_multiplier = getattr(dataset, 'freq_multiplier', 1)
+
     # Extract embeddings
     embeddings_list = []
     window_indices = []
@@ -190,7 +197,7 @@ def extract_trajectory_windows_embeddings(
     for idx, sample in trajectory_samples:
         try:
             # Extract action label for this window
-            action_label = _get_action_label_for_window(sample)
+            action_label = _get_action_label_for_window(sample, freq_multiplier=freq_multiplier)
             action_labels.append(action_label)
 
             if layer == 'input':

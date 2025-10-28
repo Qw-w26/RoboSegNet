@@ -37,7 +37,7 @@ data:
   # Feature extraction
   vocab_size: 2048
   label_smoother_type: gaussian
-  label_smoother_sigma: 2.0
+  label_smoother_sigma: 1.0
   label_smoother_peak_value: 1.0
 
   # Processing
@@ -57,7 +57,7 @@ training:
   # Loss function: dist_ce | kl_div | js_div | focal_dist_ce | bce | weighted_bce | soft_focal | focal_bce | mse
   # RECOMMENDED: dist_ce (Distribution Cross-Entropy) - treats window as probability distribution
   # LEGACY: bce (Binary Cross-Entropy) - treats each frame independently (not ideal for this task)
-  loss_type: kl_div
+  loss_type: dist_ce
 
   # Loss hyperparameters (only applicable to certain loss types)
   loss_pos_weight: 10.0  # For: bce, weighted_bce
@@ -68,8 +68,8 @@ training:
   classification_threshold: 0.05  # Threshold for binary classification (probability > threshold = boundary)
 
   # Evaluation parameters (in seconds, will be scaled to frames at proprio_fps)
-  peak_detection_distance: 1.0  # Minimum time (seconds) between detected peaks
-  matching_tolerance: 0.5       # NOT USED - matching is done at DINO frequency with no tolerance
+  # Note: Matching is done at DINO frequency (2 Hz) with no tolerance
+  peak_detection_distance: 2.0  # Minimum time (seconds) between detected peaks
   iou_window_size: 0.5          # Window size (seconds) around each transition for IoU calculation
 
   # Regularization
@@ -77,7 +77,7 @@ training:
   use_amp: false
 
   # Checkpointing
-  checkpoint_dir: ./checkpoints/task_357
+  checkpoint_dir: ./checkpoints/task_357_2fps
   save_every: 10
   save_best_only: true
 

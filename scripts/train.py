@@ -290,14 +290,14 @@ def main():
             method='pca',  # Fast PCA visualization
             num_trajectories=3,  # Visualize 3 trajectories per split
             max_windows_per_traj=None,  # Include all windows
-            layer='token_embed',  # Visualize vocab embeddings (after embedding layer)
+            layer='proprio_encoded',  # Visualize proprioceptive encoder output (after transformer)
             color_by='action',  # Color by action labels instead of timestep
             log_on_save=True,  # Log when best model is saved
             log_on_first=True,  # Log on first epoch
             log_on_last=True  # Log at end of training
         )
         callbacks.append(embedding_vis_callback)
-        print("✓ Trajectory embedding visualization enabled (layer=token_embed, color=action)")
+        print("✓ Trajectory embedding visualization enabled (layer=proprio_encoded, color=action)")
 
     # Create trainer
     print("\n" + "="*80)
@@ -321,7 +321,6 @@ def main():
         use_distribution_loss=use_distribution_loss,
         freq_multiplier=train_dataset.freq_multiplier,  # Get from dataset
         peak_detection_distance=config.training.peak_detection_distance,
-        matching_tolerance=config.training.matching_tolerance,
         iou_window_size=config.training.iou_window_size
     )
 
