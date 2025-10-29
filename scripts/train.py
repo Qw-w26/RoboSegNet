@@ -136,7 +136,8 @@ def main():
         label_smoother_sigma=config.data.label_smoother_sigma,
         label_smoother_peak_value=config.data.label_smoother_peak_value,
         action_dim=config.data.action_dim,
-        max_samples=config.data.max_samples
+        max_samples=config.data.max_samples,
+        num_dino_frames=config.data.num_dino_frames  # Pass num_dino_frames from config
     )
 
     print("\nCreating training dataset...")

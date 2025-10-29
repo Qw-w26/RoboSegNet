@@ -5,17 +5,17 @@ experiment_name: task_357_baseline
 
 model:
   vocab_size: 2048
-  token_embed_dim: 128
-  num_dino_frames: 3  # Number of DINO frames to sample per window (evenly spaced)
+  token_embed_dim: 192
+  num_dino_frames: 6  # Number of DINO frames to sample per window (evenly spaced)
   # dino_feature_dim: Auto-calculated as num_dino_frames * 1024 = 3072
-  hidden_dims: [512, 256, 128]
+  hidden_dims: [1024, 512, 256]
   prediction_window_size: 18  # Updated to match window_size
   use_proprio: true
   use_dino: true
   transformer_dropout: 0.3
   embedding_dropout: 0.1
-  dino_encoder_dropout: 0.3
-  mlp_dropout: 0.3
+  dino_encoder_dropout: 0.4
+  mlp_dropout: 0.4
   feature_noise_std: 0.05
 
 data:
@@ -29,7 +29,6 @@ data:
   stride: 1        # Frames at window_fps (2 Hz)
   fps: 2.0         # Window FPS (matches DINO extraction rate)
   action_dim: 14
-  num_dino_frames: 6  # Number of DINO frames to sample per window (evenly spaced)
 
   # DataLoader
   batch_size: 1024
