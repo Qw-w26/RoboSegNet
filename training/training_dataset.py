@@ -64,12 +64,14 @@ class TrainingDatasetConfig:
         label_smoother_peak_value: Peak value for smoother
         max_samples: Maximum number of samples to load (None for all)
         fps: Target FPS for data (should match preprocessing)
+        num_dino_frames: Number of DINO frames to sample per window (evenly spaced)
 
     Example:
         >>> config = TrainingDatasetConfig(
         ...     window_size=180,
         ...     stride=10,
-        ...     vocab_size=2048
+        ...     vocab_size=2048,
+        ...     num_dino_frames=3
         ... )
     """
 
@@ -82,6 +84,9 @@ class TrainingDatasetConfig:
     action_dim: int = 14
     device: str = 'cuda'
     fps: float = 5.0  # Target FPS for data (should match preprocessing)
+
+    # DINO features
+    num_dino_frames: int = 3  # Number of DINO frames to sample per window
 
     # Label smoothing
     label_smoother_type: str = 'gaussian'
@@ -342,15 +347,28 @@ class BoundaryDataset(Dataset):
         # Create samples
         samples = []
         for window in windows:
+            # Extract evenly spaced DINO frames across the window
+            # Note: window.end_frame is exclusive, so use end_frame - 1
+            # For num_dino_frames=3 and window_size=18: [0, 8, 17]
+            # For num_dino_frames=5 and window_size=18: [0, 4, 8, 13, 17]
+            frame_indices = np.linspace(
+                window.begin_frame,
+                window.end_frame - 1,  # end_frame is exclusive
+                self.config.num_dino_frames,
+                dtype=int
+            )
+
+            # Extract DINO features for each sampled frame
+            dino_frame_features = []
+            for frame_idx in frame_indices:
+                dino_feat = dino_features.get(frame_idx, np.zeros(dino_dim))
+                dino_frame_features.append(torch.tensor(dino_feat, dtype=torch.float32))
+
             samples.append({
                 'episode_id': episode_id,
                 'task_id': task_id,
                 'window': window,
-                'dino_features': {
-                    'begin_frame': torch.tensor(dino_features.get(window.begin_frame, np.zeros(dino_dim)), dtype=torch.float32),
-                    'middle_frame': torch.tensor(dino_features.get(window.middle_frame, np.zeros(dino_dim)), dtype=torch.float32),
-                    'end_frame': torch.tensor(dino_features.get(window.end_frame, np.zeros(dino_dim)), dtype=torch.float32),
-                },
+                'dino_features': dino_frame_features,  # List of tensors
                 'proprio_features': torch.tensor(proprio_features[window.begin_frame], dtype=torch.long),
                 'train_labels': torch.tensor(train_labels[window.begin_frame], dtype=torch.float32),
                 'intervals': intervals,
@@ -451,7 +469,7 @@ class BoundaryDataset(Dataset):
 def collate_dict(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Custom collate function for dict-based batches.
 
-    Ported from andrew's code.
+    Handles dino_features as a list of tensors that get stacked per frame.
     """
     if len(batch) == 0:
         return {}
@@ -461,12 +479,14 @@ def collate_dict(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
 
     collated = {}
     for key in keys:
-        # Handle nested dicts (like dino_features)
-        if isinstance(batch[0][key], dict):
-            collated[key] = {
-                sub_key: torch.stack([sample[key][sub_key] for sample in batch])
-                for sub_key in batch[0][key].keys()
-            }
+        # Handle dino_features (list of tensors)
+        if key == 'dino_features':
+            # Stack each frame across batch: [(B, 1024), (B, 1024), ...]
+            num_frames = len(batch[0][key])
+            collated[key] = [
+                torch.stack([sample[key][i] for sample in batch])
+                for i in range(num_frames)
+            ]
         # Handle tensors
         elif isinstance(batch[0][key], torch.Tensor):
             collated[key] = torch.stack([sample[key] for sample in batch])

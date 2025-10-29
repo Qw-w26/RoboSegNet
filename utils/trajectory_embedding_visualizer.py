@@ -72,11 +72,8 @@ def _extract_layer_embedding(
     with torch.no_grad():
         # Prepare inputs (batch size = 1)
         proprio_tokens = sample['proprio_features'].unsqueeze(0).to(device)
-        dino_features_cat = torch.cat([
-            sample['dino_features']['begin_frame'],
-            sample['dino_features']['middle_frame'],
-            sample['dino_features']['end_frame']
-        ]).unsqueeze(0).to(device)
+        # Concatenate DINO features (list of tensors)
+        dino_features_cat = torch.cat(sample['dino_features']).unsqueeze(0).to(device)
 
         if layer == 'token_embed':
             # Extract token embeddings (before transformer)
@@ -205,12 +202,8 @@ def extract_trajectory_windows_embeddings(
                 # Extract proprio tokens
                 proprio_tokens = sample['proprio_features'].numpy()
 
-                # Extract DINO features (3 frames)
-                dino_features = torch.cat([
-                    sample['dino_features']['begin_frame'],
-                    sample['dino_features']['middle_frame'],
-                    sample['dino_features']['end_frame']
-                ]).numpy()
+                # Extract DINO features (list of tensors)
+                dino_features = torch.cat(sample['dino_features']).numpy()
 
                 # Concatenate
                 embedding = np.concatenate([proprio_tokens, dino_features])

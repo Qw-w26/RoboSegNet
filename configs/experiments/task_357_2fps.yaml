@@ -6,7 +6,8 @@ experiment_name: task_357_baseline
 model:
   vocab_size: 2048
   token_embed_dim: 128
-  dino_feature_dim: 3072
+  num_dino_frames: 3  # Number of DINO frames to sample per window (evenly spaced)
+  # dino_feature_dim: Auto-calculated as num_dino_frames * 1024 = 3072
   hidden_dims: [512, 256, 128]
   prediction_window_size: 18  # Updated to match window_size
   use_proprio: true
@@ -28,9 +29,10 @@ data:
   stride: 1        # Frames at window_fps (2 Hz)
   fps: 2.0         # Window FPS (matches DINO extraction rate)
   action_dim: 14
+  num_dino_frames: 6  # Number of DINO frames to sample per window (evenly spaced)
 
   # DataLoader
-  batch_size: 256
+  batch_size: 1024
   num_workers: 4
   pin_memory: true
 
@@ -45,7 +47,7 @@ data:
   max_samples: null
 
 training:
-  num_epochs: 100
+  num_epochs: 1000
   learning_rate: 0.0001
   weight_decay: 0.0001
   optimizer: adam
@@ -54,10 +56,10 @@ training:
   scheduler: cosine
   min_lr: 0.000001
 
-  # Loss function: dist_ce | kl_div | js_div | focal_dist_ce | bce | weighted_bce | soft_focal | focal_bce | mse
+  # Loss function: dist_ce | kl_div | js_div | focal_dist_ce | bce | weighted_bce | soft_focal | focal_bce | mse | mse_raw
   # RECOMMENDED: dist_ce (Distribution Cross-Entropy) - treats window as probability distribution
   # LEGACY: bce (Binary Cross-Entropy) - treats each frame independently (not ideal for this task)
-  loss_type: dist_ce
+  loss_type: mse
 
   # Loss hyperparameters (only applicable to certain loss types)
   loss_pos_weight: 10.0  # For: bce, weighted_bce
@@ -65,7 +67,7 @@ training:
   loss_gamma: 2.0        # For: soft_focal, focal_bce, focal_dist_ce
 
   # Metrics
-  classification_threshold: 0.05  # Threshold for binary classification (probability > threshold = boundary)
+  classification_threshold: 0.5  # Threshold for binary classification (probability > threshold = boundary)
 
   # Evaluation parameters (in seconds, will be scaled to frames at proprio_fps)
   # Note: Matching is done at DINO frequency (2 Hz) with no tolerance

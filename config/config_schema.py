@@ -24,7 +24,8 @@ class ModelConfig:
     Attributes:
         vocab_size: Tokenizer vocabulary size
         token_embed_dim: Dimension of token embeddings
-        dino_feature_dim: DINO feature dimension (3 frames * 1024 = 3072)
+        num_dino_frames: Number of DINO frames to sample per window (evenly spaced)
+        dino_feature_dim: DINO feature dimension (auto-calculated: num_dino_frames * 1024)
         hidden_dims: List of hidden layer dimensions for MLP
         prediction_window_size: Number of frames to predict boundaries for
         use_proprio: Whether to use proprioceptive features
@@ -37,7 +38,8 @@ class ModelConfig:
     """
     vocab_size: int = 2048
     token_embed_dim: int = 128
-    dino_feature_dim: int = 3072  # 3 frames * 1024
+    num_dino_frames: int = 3  # Number of DINO frames to sample per window
+    dino_feature_dim: Optional[int] = None  # Auto-calculated as num_dino_frames * 1024
     hidden_dims: List[int] = field(default_factory=lambda: [512, 256, 128])
     prediction_window_size: int = 18
 
@@ -53,6 +55,17 @@ class ModelConfig:
     def __post_init__(self):
         if not (self.use_proprio or self.use_dino):
             raise ValueError("At least one of use_proprio or use_dino must be True")
+
+        # Auto-calculate dino_feature_dim from num_dino_frames
+        if self.dino_feature_dim is None:
+            self.dino_feature_dim = self.num_dino_frames * 1024
+
+        # Validate that dino_feature_dim matches num_dino_frames
+        expected_dim = self.num_dino_frames * 1024
+        if self.dino_feature_dim != expected_dim:
+            print(f"Warning: dino_feature_dim ({self.dino_feature_dim}) does not match "
+                  f"num_dino_frames * 1024 ({expected_dim}). Overriding to {expected_dim}.")
+            self.dino_feature_dim = expected_dim
 
 
 @dataclass
@@ -72,6 +85,7 @@ class DataConfig:
         stride: Stride for window sampling (frames)
         fps: Target FPS for data (should match preprocessing)
         action_dim: Action dimension for proprioception
+        num_dino_frames: Number of DINO frames to sample per window (evenly spaced)
 
         # DataLoader
         batch_size: Batch size for training
@@ -98,6 +112,7 @@ class DataConfig:
     stride: int = 10
     fps: float = 5.0
     action_dim: int = 14
+    num_dino_frames: int = 3  # Number of DINO frames to sample per window
 
     # DataLoader
     batch_size: int = 512
@@ -283,6 +298,10 @@ class ExperimentConfig:
         # Sync vocab_size between model and data
         if self.model.vocab_size != self.data.vocab_size:
             self.data.vocab_size = self.model.vocab_size
+
+        # Sync num_dino_frames between model and data
+        if self.model.num_dino_frames != self.data.num_dino_frames:
+            self.data.num_dino_frames = self.model.num_dino_frames
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert config to dictionary."""

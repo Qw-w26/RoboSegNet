@@ -445,6 +445,7 @@ class BoundaryTrainer(Trainer):
         crop_labels_fn: Optional[Callable] = None,
         classification_threshold: float = 0.5,
         use_distribution_loss: bool = False,
+        use_raw_output: bool = False,
         freq_multiplier: int = 1,
         peak_detection_distance: float = 5.0,
         iou_window_size: float = 5.0
@@ -463,6 +464,7 @@ class BoundaryTrainer(Trainer):
         self.crop_labels_fn = crop_labels_fn or self._default_crop_labels
         self.classification_threshold = classification_threshold
         self.use_distribution_loss = use_distribution_loss
+        self.use_raw_output = use_raw_output
         self.freq_multiplier = freq_multiplier  # For mapping window fps to proprio fps
 
         # Evaluation parameters (in seconds, will be scaled to frames at proprio_fps)
@@ -474,6 +476,7 @@ class BoundaryTrainer(Trainer):
 
         print(f"Classification threshold: {self.classification_threshold}")
         print(f"Using distribution loss: {self.use_distribution_loss}")
+        print(f"Using raw output (no sigmoid/softmax): {self.use_raw_output}")
         print(f"Evaluation parameters (will be scaled by freq_multiplier):")
         print(f"  Peak detection distance: {self.peak_detection_distance}s")
         print(f"  Matching: At DINO frequency (no tolerance)")
@@ -969,19 +972,21 @@ class BoundaryTrainer(Trainer):
         # Extract predictions and metadata for trajectory-level metrics
         with torch.no_grad():
             tokenized_actions = batch['proprio_features'].to(self.device)
-            dino_features = torch.cat([
-                batch['dino_features']['begin_frame'],
-                batch['dino_features']['middle_frame'],
-                batch['dino_features']['end_frame']
-            ], dim=1).to(self.device)
+            # Concatenate DINO frames: list of tensors [(B, 1024), (B, 1024), ...]
+            dino_features = torch.cat(batch['dino_features'], dim=1).to(self.device)
 
             # Get predictions
             logits = self.model(tokenized_actions, None, dino_features)
 
-            # Use softmax for distribution losses, sigmoid for per-frame losses
-            if self.use_distribution_loss:
+            # Apply appropriate activation based on loss type
+            if self.use_raw_output:
+                # Raw outputs (for mse_raw): apply ReLU to bound to [0, ∞)
+                probabilities = torch.relu(logits)
+            elif self.use_distribution_loss:
+                # Distribution losses: softmax (sum to 1)
                 probabilities = torch.softmax(logits, dim=1)
             else:
+                # Per-frame losses: sigmoid (independent probabilities)
                 probabilities = torch.sigmoid(logits)
 
             # Convert to numpy
@@ -1013,19 +1018,21 @@ class BoundaryTrainer(Trainer):
 
         # Extract predictions and metadata for trajectory-level metrics
         tokenized_actions = batch['proprio_features'].to(self.device)
-        dino_features = torch.cat([
-            batch['dino_features']['begin_frame'],
-            batch['dino_features']['middle_frame'],
-            batch['dino_features']['end_frame']
-        ], dim=1).to(self.device)
+        # Concatenate DINO frames: list of tensors [(B, 1024), (B, 1024), ...]
+        dino_features = torch.cat(batch['dino_features'], dim=1).to(self.device)
 
         # Get predictions
         logits = self.model(tokenized_actions, None, dino_features)
 
-        # Use softmax for distribution losses, sigmoid for per-frame losses
-        if self.use_distribution_loss:
+        # Apply appropriate activation based on loss type
+        if self.use_raw_output:
+            # Raw outputs (for mse_raw): apply ReLU to bound to [0, ∞)
+            probabilities = torch.relu(logits)
+        elif self.use_distribution_loss:
+            # Distribution losses: softmax (sum to 1)
             probabilities = torch.softmax(logits, dim=1)
         else:
+            # Per-frame losses: sigmoid (independent probabilities)
             probabilities = torch.sigmoid(logits)
 
         # Convert to numpy
@@ -1110,9 +1117,9 @@ class BoundaryTrainer(Trainer):
     ) -> tuple:
         """Process one batch for boundary prediction.
 
-        Expected batch format (from andrew's TrainingDataset):
+        Expected batch format:
         - 'proprio_features': Tokenized proprioceptive actions
-        - 'dino_features': Dict with 'begin_frame', 'middle_frame', 'end_frame'
+        - 'dino_features': List of tensors [(B, 1024), (B, 1024), ...] for num_dino_frames
         - 'train_labels': Smoothed boundary labels
         - 'task_id', 'episode_id', 'window', 'intervals': Metadata
 
@@ -1121,11 +1128,8 @@ class BoundaryTrainer(Trainer):
         """
         # Move data to device
         tokenized_actions = batch['proprio_features'].to(self.device)
-        dino_features = torch.cat([
-            batch['dino_features']['begin_frame'],
-            batch['dino_features']['middle_frame'],
-            batch['dino_features']['end_frame']
-        ], dim=1).to(self.device)
+        # Concatenate DINO frames: list of tensors [(B, 1024), (B, 1024), ...]
+        dino_features = torch.cat(batch['dino_features'], dim=1).to(self.device)
         labels = batch['train_labels'].to(self.device)
 
         # Crop labels to prediction window
@@ -1157,8 +1161,14 @@ class BoundaryTrainer(Trainer):
         trajectory_data = []
         if collect_trajectory_data:
             with torch.no_grad():
-                # Use softmax for distribution losses, sigmoid for per-frame losses
-                if self.use_distribution_loss:
+                # Apply appropriate activation based on loss type
+                if self.use_raw_output:
+                    # Raw outputs (for mse_raw): apply ReLU to bound to [0, ∞)
+                    probabilities = torch.relu(logits)
+                    # For raw: threshold at classification_threshold
+                    predictions = (probabilities > self.classification_threshold).float()
+                    normalized_labels = labels  # Keep raw labels for raw output
+                elif self.use_distribution_loss:
                     probabilities = torch.softmax(logits, dim=1)
                     # For distribution: find peaks (argmax gives single boundary per window)
                     predictions = torch.zeros_like(probabilities)

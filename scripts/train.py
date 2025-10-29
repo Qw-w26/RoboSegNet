@@ -304,9 +304,12 @@ def main():
     print("Initializing trainer...")
     print("="*80)
 
-    # Determine if using distribution-based loss
+    # Determine loss output type
     distribution_losses = ['dist_ce', 'kl_div', 'js_div', 'focal_dist_ce']
+    raw_output_losses = ['mse_raw']  # Losses that use raw logits (no sigmoid/softmax)
+
     use_distribution_loss = config.training.loss_type in distribution_losses
+    use_raw_output = config.training.loss_type in raw_output_losses
 
     trainer = BoundaryTrainer(
         model=model,
@@ -319,6 +322,7 @@ def main():
         prediction_window_size=config.model.prediction_window_size,
         classification_threshold=config.training.classification_threshold,
         use_distribution_loss=use_distribution_loss,
+        use_raw_output=use_raw_output,
         freq_multiplier=train_dataset.freq_multiplier,  # Get from dataset
         peak_detection_distance=config.training.peak_detection_distance,
         iou_window_size=config.training.iou_window_size

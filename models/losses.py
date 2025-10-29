@@ -308,25 +308,31 @@ class WeightedBCELoss(nn.Module):
 
 class MSEProbabilityLoss(nn.Module):
     """
-    Mean Squared Error loss for probability prediction.
+    Mean Squared Error loss for probability prediction with normalization.
+
+    Normalizes both predictions and targets to sum to 1 across the window,
+    then computes MSE between the normalized distributions. This makes the
+    loss focus on the relative shape/distribution rather than absolute values.
 
     Treats boundary prediction as regression problem. Simple but can
     work well with smooth labels.
     """
 
-    def __init__(self, reduction: str = 'mean'):
+    def __init__(self, reduction: str = 'mean', epsilon: float = 1e-8):
         """
         Initialize MSE Probability Loss.
 
         Args:
             reduction: 'mean', 'sum', or 'none'
+            epsilon: Small constant for numerical stability
         """
         super().__init__()
         self.reduction = reduction
+        self.epsilon = epsilon
 
     def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         """
-        Compute MSE loss on predicted probabilities.
+        Compute MSE loss on normalized predicted probabilities.
 
         Args:
             logits: Model logits
@@ -342,8 +348,71 @@ class MSEProbabilityLoss(nn.Module):
         else:
             pred_prob = torch.sigmoid(logits)
 
-        # MSE between predicted and target probability
-        loss = (pred_prob - targets) ** 2
+        # Normalize predictions to sum to 1 across window
+        pred_sum = pred_prob.sum(dim=1, keepdim=True)
+        pred_sum = torch.clamp(pred_sum, min=self.epsilon)
+        pred_normalized = pred_prob / pred_sum
+
+        # Normalize targets to sum to 1 across window
+        target_sum = targets.sum(dim=1, keepdim=True)
+        target_sum = torch.clamp(target_sum, min=self.epsilon)
+        target_normalized = targets / target_sum
+
+        # MSE between normalized predictions and targets
+        loss = (pred_normalized - target_normalized) ** 2
+
+        if self.reduction == 'mean':
+            return loss.mean()
+        elif self.reduction == 'sum':
+            return loss.sum()
+        else:
+            return loss
+
+
+class MSERawLoss(nn.Module):
+    """
+    Mean Squared Error loss on raw logits (no sigmoid/softmax).
+
+    Directly regresses logits to match target values without probability
+    constraints. Useful when targets have multiple peaks at 1.0 and you
+    want the model to output raw values rather than probabilities.
+
+    Note: Model outputs are unbounded - you may want to apply activation
+    (sigmoid/relu) at inference time to bound outputs to [0, 1] or [0, ∞).
+    """
+
+    def __init__(self, reduction: str = 'mean', apply_relu: bool = False):
+        """
+        Initialize MSE Raw Loss.
+
+        Args:
+            reduction: 'mean', 'sum', or 'none'
+            apply_relu: If True, apply ReLU to logits before computing loss
+                       (constrains outputs to [0, ∞), useful for non-negative targets)
+        """
+        super().__init__()
+        self.reduction = reduction
+        self.apply_relu = apply_relu
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """
+        Compute MSE loss on raw logits.
+
+        Args:
+            logits: Model logits (raw, no activation)
+            targets: Target values (e.g., Gaussian-smoothed labels with peaks at 1.0)
+
+        Returns:
+            Scalar loss value
+        """
+        # Optionally apply ReLU to constrain to non-negative
+        if self.apply_relu:
+            pred = F.relu(logits)
+        else:
+            pred = logits
+
+        # MSE between raw outputs and targets
+        loss = (pred - targets) ** 2
 
         if self.reduction == 'mean':
             return loss.mean()
@@ -761,13 +830,14 @@ def get_loss_function(
         - 'js_div': JensenShannonLoss
         - 'focal_dist_ce': FocalDistributionCELoss
 
-        Per-frame binary classification (legacy):
+        Per-frame regression/classification:
         - 'focal': FocalLoss
         - 'soft_focal': SoftFocalLoss
         - 'focal_bce': FocalLossBCE
         - 'bce': SoftBCELoss
         - 'weighted_bce': WeightedBCELoss
-        - 'mse': MSEProbabilityLoss
+        - 'mse': MSEProbabilityLoss (outputs via sigmoid)
+        - 'mse_raw': MSERawLoss (raw outputs, no activation)
 
     Example:
         >>> # Recommended for boundary prediction
@@ -790,6 +860,7 @@ def get_loss_function(
         'bce': SoftBCELoss,
         'weighted_bce': WeightedBCELoss,
         'mse': MSEProbabilityLoss,
+        'mse_raw': MSERawLoss,
     }
 
     if loss_name not in loss_map:
