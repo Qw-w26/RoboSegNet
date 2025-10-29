@@ -208,6 +208,17 @@ class Trainer:
                 'epoch': epoch
             }
 
+            # Add metrics by tolerance
+            if 'metrics_by_tolerance' in train_results:
+                for tol_key, tol_metrics in train_results['metrics_by_tolerance'].items():
+                    for metric_name, metric_value in tol_metrics.items():
+                        logs[f'train_{metric_name}_@{tol_key}'] = metric_value
+
+            if 'metrics_by_tolerance' in val_results:
+                for tol_key, tol_metrics in val_results['metrics_by_tolerance'].items():
+                    for metric_name, metric_value in tol_metrics.items():
+                        logs[f'val_{metric_name}_@{tol_key}'] = metric_value
+
             # Add trajectory data if collected (legacy window-level plots)
             if should_collect_plots:
                 logs['train_trajectory_data'] = train_trajectory_data
@@ -227,6 +238,13 @@ class Trainer:
             if val_loss is not None:
                 print(f" | Val Loss: {val_loss:.4f}, P: {val_results.get('precision', 0.0):.3f}, R: {val_results.get('recall', 0.0):.3f}, F1: {val_f1:.3f}, IoU: {val_results.get('avg_iou', 0.0):.3f}", end='')
             print(f" | LR: {current_lr:.6f}")
+
+            # Print metrics by tolerance
+            if 'metrics_by_tolerance' in val_results and val_results['metrics_by_tolerance']:
+                print("  Metrics by tolerance:")
+                for tol_key in sorted(val_results['metrics_by_tolerance'].keys()):
+                    tol_metrics = val_results['metrics_by_tolerance'][tol_key]
+                    print(f"    @{tol_key}: P={tol_metrics['precision']:.3f}, R={tol_metrics['recall']:.3f}, F1={tol_metrics['f1_score']:.3f}, IoU={tol_metrics['avg_iou']:.3f}, Dist={tol_metrics['avg_peak_distance']:.3f}s")
 
             # Callback: on_epoch_end
             for callback in self.callbacks:
@@ -448,7 +466,8 @@ class BoundaryTrainer(Trainer):
         use_raw_output: bool = False,
         freq_multiplier: int = 1,
         peak_detection_distance: float = 5.0,
-        iou_window_size: float = 5.0
+        iou_window_size: float = 5.0,
+        metric_tolerances: Optional[List[float]] = None
     ):
         super().__init__(
             model=model,
@@ -470,6 +489,7 @@ class BoundaryTrainer(Trainer):
         # Evaluation parameters (in seconds, will be scaled to frames at proprio_fps)
         self.peak_detection_distance = peak_detection_distance  # Minimum seconds between peaks
         self.iou_window_size = iou_window_size  # Window size in seconds for IoU calculation
+        self.metric_tolerances = metric_tolerances or [1.0, 2.0, 3.0]  # Tolerances in seconds
 
         if freq_multiplier > 1:
             print(f"Frequency multiplier: {freq_multiplier}x (window frames will be mapped to timeline)")
@@ -479,7 +499,7 @@ class BoundaryTrainer(Trainer):
         print(f"Using raw output (no sigmoid/softmax): {self.use_raw_output}")
         print(f"Evaluation parameters (will be scaled by freq_multiplier):")
         print(f"  Peak detection distance: {self.peak_detection_distance}s")
-        print(f"  Matching: At DINO frequency (no tolerance)")
+        print(f"  Matching tolerances: {self.metric_tolerances}s")
         print(f"  IoU window size: ±{self.iou_window_size}s")
 
     def _train_epoch(
@@ -552,8 +572,13 @@ class BoundaryTrainer(Trainer):
             'loss': avg_loss,
             'accuracy': metrics['accuracy'],
             'f1_score': metrics['f1_score'],
+            'precision': metrics.get('precision', 0.0),
+            'recall': metrics.get('recall', 0.0),
+            'avg_iou': metrics.get('avg_iou', 0.0),
+            'avg_peak_distance': metrics.get('avg_peak_distance', 0.0),
             'trajectory_data': trajectory_data,
-            'trajectory_plots': metrics.get('trajectory_plots', [])
+            'trajectory_plots': metrics.get('trajectory_plots', []),
+            'metrics_by_tolerance': metrics.get('metrics_by_tolerance', {})
         }
 
     def _validate_epoch(
@@ -612,8 +637,13 @@ class BoundaryTrainer(Trainer):
             'loss': avg_loss,
             'accuracy': metrics['accuracy'],
             'f1_score': metrics['f1_score'],
+            'precision': metrics.get('precision', 0.0),
+            'recall': metrics.get('recall', 0.0),
+            'avg_iou': metrics.get('avg_iou', 0.0),
+            'avg_peak_distance': metrics.get('avg_peak_distance', 0.0),
             'trajectory_data': trajectory_data,
-            'trajectory_plots': metrics.get('trajectory_plots', [])
+            'trajectory_plots': metrics.get('trajectory_plots', []),
+            'metrics_by_tolerance': metrics.get('metrics_by_tolerance', {})
         }
 
     def _accumulate_trajectory_predictions(
@@ -740,99 +770,84 @@ class BoundaryTrainer(Trainer):
         self,
         trajectories: Dict[Tuple[int, int], Dict[str, Any]]
     ) -> Dict[str, Any]:
-        """Compute trajectory-level metrics with peak detection and IoU comparison.
+        """Compute trajectory-level metrics with peak detection at multiple tolerances.
 
         Args:
             trajectories: Dictionary from _accumulate_trajectory_predictions
 
         Returns:
-            Dictionary with metrics and trajectory plots data
+            Dictionary with metrics at each tolerance and trajectory plots data
         """
-        all_tp = 0
-        all_fp = 0
-        all_fn = 0
-
-        all_ious = []
-        all_peak_distances = []
-        trajectory_plots = []
+        # First, detect peaks once for all trajectories
+        all_trajectory_data = []
 
         for traj_key, traj_data in trajectories.items():
             task_id, episode_id = traj_key
             timeline_scores = traj_data['timeline_scores']
             ground_truth_transitions = traj_data['ground_truth_transitions']
 
-            # Use peak detection instead of threshold-based approach
-            # Find peaks with reasonable parameters for keyframe detection
-            # NOTE: Timeline is at proprio_fps, convert time-based parameters to frames
-
-            # Convert configurable parameters (in seconds) to frames at proprio_fps
-            # proprio_fps ≈ window_fps * freq_multiplier
-            # So: frames = seconds * window_fps * freq_multiplier
-
-            # For simplicity, we directly compute frames from seconds knowing the timeline frequency
-            # peak_detection_distance: minimum time between detected peaks (in seconds)
-            # This is converted to frames assuming window_fps as the base frequency
+            # Use peak detection to find predicted boundaries
             peak_distance = max(1, int(self.peak_detection_distance * self.freq_multiplier))
 
             predicted_peaks, peak_properties = find_peaks(
                 timeline_scores,
                 height=self.classification_threshold,
-                distance=peak_distance,  # Minimum frames between boundaries at proprio fps
-                prominence=0.01  # Peak must stand out by 1% probability
+                distance=peak_distance,
+                prominence=0.01
             )
 
             # Get peak scores for visualization
             peak_scores = timeline_scores[predicted_peaks] if len(predicted_peaks) > 0 else np.array([])
 
-            # Match predictions to ground truth at DINO frequency (no tolerance)
-            # Map both predictions and GT from proprio_fps to window_fps
-            # Two predictions/GTs match if they map to the same window frame
+            all_trajectory_data.append({
+                'task_id': task_id,
+                'episode_id': episode_id,
+                'timeline_scores': timeline_scores,
+                'ground_truth_transitions': ground_truth_transitions,
+                'predicted_peaks': predicted_peaks,
+                'peak_scores': peak_scores
+            })
 
-            matched_gt = set()
-            matched_pred = set()
-            ious = []
-            distances = []
+        # Compute metrics at each tolerance level
+        metrics_by_tolerance = {}
 
-            # Map GT transitions from proprio_fps to window_fps
-            gt_at_window_fps = {}
-            for gt_idx in ground_truth_transitions:
-                gt_window_frame = gt_idx // self.freq_multiplier
-                if gt_window_frame not in gt_at_window_fps:
-                    gt_at_window_fps[gt_window_frame] = []
-                gt_at_window_fps[gt_window_frame].append(gt_idx)
+        for tolerance in self.metric_tolerances:
+            # Convert tolerance from seconds to frames
+            tolerance_frames = max(1, int(tolerance * self.freq_multiplier))
 
-            # Map predicted peaks from proprio_fps to window_fps
-            pred_at_window_fps = {}
-            for i, pred_idx in enumerate(predicted_peaks):
-                pred_window_frame = pred_idx // self.freq_multiplier
-                if pred_window_frame not in pred_at_window_fps:
-                    pred_at_window_fps[pred_window_frame] = []
-                pred_at_window_fps[pred_window_frame].append((i, pred_idx))
+            all_tp = 0
+            all_fp = 0
+            all_fn = 0
+            all_ious = []
+            all_peak_distances = []
 
-            # Match at window_fps: if pred and GT are in same window frame, they match
-            # iou_window_size: window size (in seconds) around each transition for IoU calculation
-            iou_window_frames = max(1, int(self.iou_window_size * self.freq_multiplier))
+            for traj_data in all_trajectory_data:
+                timeline_scores = traj_data['timeline_scores']
+                ground_truth_transitions = traj_data['ground_truth_transitions']
+                predicted_peaks = traj_data['predicted_peaks']
 
-            for window_frame, gt_indices in gt_at_window_fps.items():
-                # Check if there's a prediction at this window frame
-                if window_frame in pred_at_window_fps:
-                    # Match: take the first (or closest) prediction at this window frame
-                    for gt_idx in gt_indices:
-                        if gt_idx in matched_gt:
+                # Match predictions to ground truth with tolerance
+                matched_gt = set()
+                matched_pred = set()
+                ious = []
+                distances = []
+
+                # For each ground truth transition, find predictions within tolerance
+                for gt_idx in ground_truth_transitions:
+                    best_distance = float('inf')
+                    best_pred_idx = None
+                    best_iou = 0.0
+
+                    for i, pred_idx in enumerate(predicted_peaks):
+                        if i in matched_pred:
                             continue  # Already matched
 
-                        # Find best matching prediction at this window frame
-                        best_iou = 0.0
-                        best_distance = float('inf')
-                        best_pred_idx = None
+                        distance = abs(pred_idx - gt_idx)
 
-                        for pred_i, pred_idx in pred_at_window_fps[window_frame]:
-                            if pred_i in matched_pred:
-                                continue  # Already matched
-
-                            distance = abs(pred_idx - gt_idx)
-
+                        # Check if within tolerance
+                        if distance <= tolerance_frames:
                             # Compute IoU using a window around each transition
+                            iou_window_frames = max(1, int(self.iou_window_size * self.freq_multiplier))
                             gt_window = set(range(max(0, gt_idx - iou_window_frames),
                                                  min(len(timeline_scores), gt_idx + iou_window_frames + 1)))
                             pred_window = set(range(max(0, pred_idx - iou_window_frames),
@@ -845,56 +860,90 @@ class BoundaryTrainer(Trainer):
                             if distance < best_distance:
                                 best_distance = distance
                                 best_iou = iou
-                                best_pred_idx = pred_i
+                                best_pred_idx = i
 
-                        if best_pred_idx is not None:
-                            matched_gt.add(gt_idx)
-                            matched_pred.add(best_pred_idx)
-                            ious.append(best_iou)
-                            distances.append(best_distance)
+                    if best_pred_idx is not None:
+                        matched_gt.add(gt_idx)
+                        matched_pred.add(best_pred_idx)
+                        ious.append(best_iou)
+                        distances.append(best_distance)
 
-            # Compute TP, FP, FN based on matches
-            tp = len(matched_gt)
-            fp = len(predicted_peaks) - len(matched_pred)
-            fn = len(ground_truth_transitions) - len(matched_gt)
+                # Compute TP, FP, FN for this trajectory
+                tp = len(matched_gt)
+                fp = len(predicted_peaks) - len(matched_pred)
+                fn = len(ground_truth_transitions) - len(matched_gt)
 
-            all_tp += tp
-            all_fp += fp
-            all_fn += fn
-            all_ious.extend(ious)
-            all_peak_distances.extend(distances)
+                all_tp += tp
+                all_fp += fp
+                all_fn += fn
+                all_ious.extend(ious)
+                all_peak_distances.extend(distances)
 
-            # Store visualization data with predicted peaks
+            # Calculate metrics for this tolerance
+            precision = all_tp / (all_tp + all_fp) if (all_tp + all_fp) > 0 else 0.0
+            recall = all_tp / (all_tp + all_fn) if (all_tp + all_fn) > 0 else 0.0
+            f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+            avg_iou = np.mean(all_ious) if len(all_ious) > 0 else 0.0
+            avg_distance = np.mean(all_peak_distances) if len(all_peak_distances) > 0 else 0.0
+
+            # Convert average distance from frames back to seconds
+            avg_distance_seconds = avg_distance / self.freq_multiplier if self.freq_multiplier > 0 else 0.0
+
+            metrics_by_tolerance[f'{tolerance}s'] = {
+                'accuracy': float(precision),  # Using precision as accuracy proxy
+                'precision': float(precision),
+                'recall': float(recall),
+                'f1_score': float(f1),
+                'avg_iou': float(avg_iou),
+                'avg_peak_distance': float(avg_distance_seconds),  # In seconds
+                'num_tp': int(all_tp),
+                'num_fp': int(all_fp),
+                'num_fn': int(all_fn)
+            }
+
+        # Build trajectory plots with the first tolerance for visualization
+        first_tolerance = self.metric_tolerances[0]
+        tolerance_frames = max(1, int(first_tolerance * self.freq_multiplier))
+        trajectory_plots = []
+
+        for traj_data in all_trajectory_data:
+            timeline_scores = traj_data['timeline_scores']
+            ground_truth_transitions = traj_data['ground_truth_transitions']
+            predicted_peaks = traj_data['predicted_peaks']
+
+            # Find matches for visualization
+            matched_pred = set()
+            for gt_idx in ground_truth_transitions:
+                for i, pred_idx in enumerate(predicted_peaks):
+                    if i not in matched_pred and abs(pred_idx - gt_idx) <= tolerance_frames:
+                        matched_pred.add(i)
+                        break
+
             trajectory_plots.append({
-                'task_id': task_id,
-                'episode_id': episode_id,
+                'task_id': traj_data['task_id'],
+                'episode_id': traj_data['episode_id'],
                 'timeline_scores': timeline_scores,
                 'ground_truth_transitions': ground_truth_transitions,
                 'predicted_peaks': predicted_peaks,
-                'peak_scores': peak_scores,
+                'peak_scores': traj_data['peak_scores'],
                 'threshold': self.classification_threshold,
                 'matched_predictions': [predicted_peaks[i] for i in matched_pred],
                 'unmatched_predictions': [predicted_peaks[i] for i in range(len(predicted_peaks)) if i not in matched_pred]
             })
 
-        # Calculate overall metrics
-        precision = all_tp / (all_tp + all_fp) if (all_tp + all_fp) > 0 else 0.0
-        recall = all_tp / (all_tp + all_fn) if (all_tp + all_fn) > 0 else 0.0
-        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
-
-        # Compute average IoU and distance for matched transitions
-        avg_iou = np.mean(all_ious) if len(all_ious) > 0 else 0.0
-        avg_distance = np.mean(all_peak_distances) if len(all_peak_distances) > 0 else 0.0
+        # Return metrics for the first tolerance as the main metrics (for backward compatibility)
+        # Plus all metrics by tolerance
+        first_tol_key = f'{self.metric_tolerances[0]}s'
+        main_metrics = metrics_by_tolerance[first_tol_key]
 
         return {
-            'accuracy': float(precision),  # For keyframe detection, precision is more meaningful than frame-level accuracy
-            'f1_score': float(f1),
-            'precision': float(precision),
-            'recall': float(recall),
-            'avg_iou': float(avg_iou),
-            'avg_peak_distance': float(avg_distance),
-            'num_predicted_peaks': int(all_tp + all_fp),
-            'num_gt_transitions': int(all_tp + all_fn),
+            'accuracy': main_metrics['accuracy'],
+            'f1_score': main_metrics['f1_score'],
+            'precision': main_metrics['precision'],
+            'recall': main_metrics['recall'],
+            'avg_iou': main_metrics['avg_iou'],
+            'avg_peak_distance': main_metrics['avg_peak_distance'],
+            'metrics_by_tolerance': metrics_by_tolerance,
             'trajectory_plots': trajectory_plots
         }
 

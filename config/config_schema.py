@@ -163,7 +163,8 @@ class TrainingConfig:
         # Evaluation parameters (time-based, auto-scaled by freq_multiplier)
         peak_detection_distance: Minimum time (seconds) between detected peaks
         iou_window_size: Window size (seconds) around transitions for IoU calculation
-                        Note: Matching is done at DINO frequency with no tolerance
+        metric_tolerances: List of tolerances (in seconds) for computing metrics
+                          Predictions within tolerance of ground truth are considered matches
 
         # Regularization
         gradient_clip_val: Gradient clipping value (None to disable)
@@ -209,6 +210,7 @@ class TrainingConfig:
     # Evaluation parameters (time-based, will be scaled by freq_multiplier)
     peak_detection_distance: float = 5.0  # Minimum time (seconds) between detected peaks
     iou_window_size: float = 5.0          # Window size (seconds) around transitions for IoU
+    metric_tolerances: List[float] = field(default_factory=lambda: [1.0, 2.0, 3.0])  # Tolerances (in seconds) for computing metrics
 
     # Regularization
     gradient_clip_val: Optional[float] = None

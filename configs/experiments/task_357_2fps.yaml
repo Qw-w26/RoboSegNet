@@ -48,7 +48,7 @@ data:
 
 training:
   num_epochs: 1000
-  learning_rate: 0.0001
+  learning_rate: 0.00005
   weight_decay: 0.0001
   optimizer: adam
 
@@ -67,12 +67,12 @@ training:
   loss_gamma: 2.0        # For: soft_focal, focal_bce, focal_dist_ce
 
   # Metrics
-  classification_threshold: 0.5  # Threshold for binary classification (probability > threshold = boundary)
+  classification_threshold: 0.45  # Threshold for binary classification (probability > threshold = boundary)
 
   # Evaluation parameters (in seconds, will be scaled to frames at proprio_fps)
-  # Note: Matching is done at DINO frequency (2 Hz) with no tolerance
   peak_detection_distance: 2.0  # Minimum time (seconds) between detected peaks
   iou_window_size: 0.5          # Window size (seconds) around each transition for IoU calculation
+  metric_tolerances: [1.0, 2.0, 3.0]  # Tolerances (in seconds) for computing metrics at different thresholds
 
   # Regularization
   gradient_clip_val: null

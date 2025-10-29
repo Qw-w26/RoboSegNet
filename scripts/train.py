@@ -325,7 +325,8 @@ def main():
         use_raw_output=use_raw_output,
         freq_multiplier=train_dataset.freq_multiplier,  # Get from dataset
         peak_detection_distance=config.training.peak_detection_distance,
-        iou_window_size=config.training.iou_window_size
+        iou_window_size=config.training.iou_window_size,
+        metric_tolerances=config.training.metric_tolerances
     )
 
     # Train
