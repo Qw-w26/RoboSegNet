@@ -141,6 +141,19 @@ class WandBCallback(Callback):
             if self.log_model:
                 wandb.watch(trainer.model, log='all', log_freq=100)
 
+            # Log multi-task configuration if available
+            if 'data' in self.config:
+                data_config = self.config['data']
+                if 'train_task_ids' in data_config and data_config['train_task_ids']:
+                    train_tasks = data_config['train_task_ids']
+                    eval_tasks = data_config.get('eval_task_ids', train_tasks)
+
+                    wandb.run.summary['train_tasks'] = train_tasks
+                    wandb.run.summary['eval_tasks'] = eval_tasks
+                    wandb.run.summary['num_train_tasks'] = len(train_tasks)
+                    wandb.run.summary['num_eval_tasks'] = len(eval_tasks)
+                    wandb.run.summary['is_cross_task_eval'] = (train_tasks != eval_tasks)
+
         except ImportError:
             warnings.warn("wandb not installed, skipping W&B logging")
 
@@ -151,53 +164,73 @@ class WandBCallback(Callback):
 
         import wandb
 
-        # Log scalar metrics
-        metrics = {
-            'epoch': epoch,
-            'train_loss': logs.get('train_loss', 0.0),
-            'val_loss': logs.get('val_loss', 0.0),
-            'learning_rate': logs.get('learning_rate', 0.0)
-        }
+        # Organize metrics into categories for better WandB visualization
+        metrics = {'epoch': epoch}
 
-        # Add any additional metrics from logs (including IoU, peak distance, etc.)
+        # Core losses
+        loss_metrics = {}
+        if 'train_loss' in logs:
+            loss_metrics['train/loss'] = logs['train_loss']
+        if 'val_loss' in logs:
+            loss_metrics['val/loss'] = logs['val_loss']
+
+        # Learning rate
+        if 'learning_rate' in logs:
+            metrics['learning_rate'] = logs['learning_rate']
+
+        # Evaluation metrics (organized by tolerance)
+        eval_metrics = {}
+        task_metrics = {}
+
         for key, value in logs.items():
-            if key not in metrics and isinstance(value, (int, float)):
+            if not isinstance(value, (int, float)):
+                continue
+
+            # Skip already logged metrics
+            if key in ['epoch', 'train_loss', 'val_loss', 'learning_rate']:
+                continue
+
+            # Organize by category
+            if 'train_' in key:
+                eval_metrics[f'train/{key.replace("train_", "")}'] = value
+            elif 'val_' in key:
+                eval_metrics[f'val/{key.replace("val_", "")}'] = value
+            elif 'task_' in key:
+                # Task-specific metrics for multi-task training
+                task_metrics[key] = value
+            else:
                 metrics[key] = value
 
-        wandb.log(metrics)
+        # Log all metrics in organized groups
+        all_metrics = {**metrics, **loss_metrics, **eval_metrics, **task_metrics}
+        wandb.log(all_metrics)
 
-        # Log prediction plots if it's time
+        # Create and log summary table every epoch for easy viewing
+        if epoch % 5 == 0 or epoch == 0:  # Log every 5 epochs to reduce clutter
+            self._log_metrics_summary_table(logs, epoch)
+
+        # Log prediction plots if it's time - MERGED VERSION
         if (epoch + 1) % self.log_plots_every == 0:
-            # Log training predictions (window-level, legacy)
-            if 'train_trajectory_data' in logs and logs['train_trajectory_data']:
-                self._log_prediction_plots(
-                    logs['train_trajectory_data'],
-                    epoch=epoch,
-                    data_type='train'
+            # Merge train and val prediction plots into single figure
+            train_data = logs.get('train_trajectory_data', [])
+            val_data = logs.get('val_trajectory_data', [])
+
+            if train_data or val_data:
+                self._log_merged_prediction_plots(
+                    train_data=train_data,
+                    val_data=val_data,
+                    epoch=epoch
                 )
 
-            # Log validation predictions (window-level, legacy)
-            if 'val_trajectory_data' in logs and logs['val_trajectory_data']:
-                self._log_prediction_plots(
-                    logs['val_trajectory_data'],
-                    epoch=epoch,
-                    data_type='val'
-                )
+        # Log trajectory timeline plots - MERGED VERSION
+        train_plots = logs.get('train_trajectory_plots', [])
+        val_plots = logs.get('val_trajectory_plots', [])
 
-        # Log trajectory-level plots (always log when available, regardless of epoch)
-        # These are computed from accumulated data across full trajectories
-        if 'train_trajectory_plots' in logs and logs['train_trajectory_plots']:
-            self._log_trajectory_timeline_plots(
-                logs['train_trajectory_plots'],
-                epoch=epoch,
-                data_type='train'
-            )
-
-        if 'val_trajectory_plots' in logs and logs['val_trajectory_plots']:
-            self._log_trajectory_timeline_plots(
-                logs['val_trajectory_plots'],
-                epoch=epoch,
-                data_type='val'
+        if train_plots or val_plots:
+            self._log_merged_trajectory_timeline_plots(
+                train_plots=train_plots,
+                val_plots=val_plots,
+                epoch=epoch
             )
 
     def on_train_end(self, trainer: 'Trainer', logs: Dict[str, Any]) -> None:
@@ -206,24 +239,147 @@ class WandBCallback(Callback):
             import wandb
             wandb.finish()
 
-    def _log_prediction_plots(
-        self,
-        trajectory_data: List[Dict[str, Any]],
-        epoch: int,
-        data_type: str = 'val'
-    ) -> None:
-        """Log prediction plots to W&B.
+    def _log_metrics_summary_table(self, logs: Dict[str, Any], epoch: int) -> None:
+        """Create and log a summary table of key metrics."""
+        import wandb
 
-        Ported from andrew's excellent visualization code.
-        Filters for interesting datapoints (those with boundaries).
+        # Extract key metrics for different tolerances
+        summary_data = []
+
+        # Get tolerance values if available
+        tolerances = []
+        for key in logs.keys():
+            if 'tol_' in key and 'val_' in key:
+                tol = key.split('tol_')[1].split('_')[0]
+                if tol not in tolerances:
+                    tolerances.append(tol)
+
+        tolerances = sorted(tolerances, key=float)
+
+        # Create row for each tolerance
+        for tol in tolerances:
+            row = {
+                'Tolerance (s)': tol,
+                'Train Precision': logs.get(f'train_precision_tol_{tol}', 0.0),
+                'Train Recall': logs.get(f'train_recall_tol_{tol}', 0.0),
+                'Train F1': logs.get(f'train_f1_tol_{tol}', 0.0),
+                'Val Precision': logs.get(f'val_precision_tol_{tol}', 0.0),
+                'Val Recall': logs.get(f'val_recall_tol_{tol}', 0.0),
+                'Val F1': logs.get(f'val_f1_tol_{tol}', 0.0),
+            }
+            summary_data.append(row)
+
+        # Add overall metrics row
+        if summary_data:
+            overall_row = {
+                'Tolerance (s)': 'Overall',
+                'Train Precision': '-',
+                'Train Recall': '-',
+                'Train F1': '-',
+                'Val Precision': '-',
+                'Val Recall': '-',
+                'Val F1': '-',
+            }
+
+            # Add loss info
+            if 'train_loss' in logs:
+                overall_row['Train Loss'] = f"{logs['train_loss']:.4f}"
+            if 'val_loss' in logs:
+                overall_row['Val Loss'] = f"{logs['val_loss']:.4f}"
+
+            summary_data.append(overall_row)
+
+            # Create table
+            table = wandb.Table(
+                columns=list(summary_data[0].keys()),
+                data=[list(row.values()) for row in summary_data]
+            )
+
+            wandb.log({f"metrics/summary_epoch_{epoch:03d}": table})
+
+    def _log_merged_prediction_plots(
+        self,
+        train_data: List[Dict[str, Any]],
+        val_data: List[Dict[str, Any]],
+        epoch: int
+    ) -> None:
+        """Log merged train/val prediction plots to W&B in a single figure.
+
+        Creates a combined figure with train plots on top and val plots on bottom.
         """
         import wandb
 
-        if len(trajectory_data) == 0:
-            print(f"No {data_type} trajectory data available for plotting")
+        if len(train_data) == 0 and len(val_data) == 0:
+            print(f"No trajectory data available for plotting")
             return
 
-        num_plots = self.num_plots ** 2
+        num_plots_per_split = self.num_plots ** 2
+
+        # Select train data
+        train_selected = []
+        if len(train_data) > 0:
+            train_selected = self._select_interesting_datapoints(
+                train_data, num_plots_per_split, 'train'
+            )
+
+        # Select val data
+        val_selected = []
+        if len(val_data) > 0:
+            val_selected = self._select_interesting_datapoints(
+                val_data, num_plots_per_split, 'val'
+            )
+
+        # Create combined figure
+        grid_size = self.num_plots
+        total_rows = grid_size * (2 if train_selected and val_selected else 1)
+
+        fig = plt.figure(figsize=(4 * grid_size, 3 * total_rows))
+
+        # Add super titles for each section
+        plot_idx = 0
+
+        # Plot training data
+        if train_selected:
+            for i, idx in enumerate(train_selected):
+                ax = plt.subplot(total_rows, grid_size, i + 1)
+                traj_data = train_data[idx]
+                self._create_prediction_plot(traj_data, ax)
+                if i == 0:
+                    ax.set_title(f'TRAIN - Task {traj_data["task_id"]}, Ep {traj_data["episode_id"]}',
+                               fontweight='bold', fontsize=10)
+                plot_idx = i + 1
+
+        # Plot validation data
+        if val_selected:
+            start_idx = len(train_selected) if train_selected else 0
+            for i, idx in enumerate(val_selected):
+                ax = plt.subplot(total_rows, grid_size, start_idx + i + 1)
+                traj_data = val_data[idx]
+                self._create_prediction_plot(traj_data, ax)
+                if i == 0 and not train_selected:
+                    ax.set_title(f'VAL - Task {traj_data["task_id"]}, Ep {traj_data["episode_id"]}',
+                               fontweight='bold', fontsize=10, color='darkgreen')
+                elif i == 0:
+                    # Add section divider
+                    ax.text(0.5, 1.15, 'VALIDATION', transform=ax.transAxes,
+                           ha='center', fontweight='bold', fontsize=12, color='darkgreen')
+
+        plt.tight_layout()
+        wandb.log({f"predictions/epoch_{epoch:03d}_train_val": wandb.Image(fig)})
+        plt.close(fig)
+
+        print(f"Logged {len(train_selected)} train + {len(val_selected)} val "
+              f"prediction plots to wandb for epoch {epoch}")
+
+    def _select_interesting_datapoints(
+        self,
+        trajectory_data: List[Dict[str, Any]],
+        num_plots: int,
+        data_type: str
+    ) -> List[int]:
+        """Select interesting datapoints for plotting."""
+        if len(trajectory_data) == 0:
+            return []
 
         # Search through a large random subset for interesting datapoints
         search_size = min(5000, len(trajectory_data))
@@ -243,30 +399,10 @@ class WandBCallback(Callback):
             min(num_plots, len(interesting_indices) + len(random_indices))
         )
 
-        print(f"Searched {search_size} {data_type} datapoints, "
-              f"found {len(interesting_indices)} interesting ones, "
-              f"logging {len(selected_indices)} {data_type} prediction plots to wandb "
-              f"for epoch {epoch}...")
+        print(f"  {data_type}: searched {search_size} datapoints, "
+              f"found {len(interesting_indices)} interesting, selected {len(selected_indices)}")
 
-        # Create subplot grid
-        grid_size = int(np.ceil(np.sqrt(len(selected_indices))))
-        fig, axes = plt.subplots(grid_size, grid_size, figsize=(12, 12))
-        axes = axes.flatten() if hasattr(axes, 'flatten') else [axes]
-
-        for idx, ax in zip(selected_indices, axes):
-            traj_data = trajectory_data[idx]
-            self._create_prediction_plot(traj_data, ax)
-
-        # Hide unused subplots
-        for ax in axes[len(selected_indices):]:
-            ax.axis('off')
-
-        plt.tight_layout()
-        wandb.log({f"epoch_{epoch:03d}_{data_type}_prediction_plots": wandb.Image(fig)})
-        plt.close(fig)
-
-        print(f"Logged {len(selected_indices)} {data_type} prediction plots "
-              f"to wandb for epoch {epoch}")
+        return selected_indices
 
     def _create_prediction_plot(self, traj_data: Dict[str, Any], ax: plt.Axes) -> None:
         """Create a prediction plot for one trajectory.
@@ -296,59 +432,87 @@ class WandBCallback(Callback):
         max_val = max(np.max(ground_truth), np.max(confidence_scores))
         ax.set_ylim(-0.01, max_val * 1.1)
 
-    def _log_trajectory_timeline_plots(
+    def _log_merged_trajectory_timeline_plots(
         self,
-        trajectory_plots: List[Dict[str, Any]],
-        epoch: int,
-        data_type: str = 'val'
+        train_plots: List[Dict[str, Any]],
+        val_plots: List[Dict[str, Any]],
+        epoch: int
     ) -> None:
-        """Log trajectory-level timeline plots to W&B.
+        """Log merged train/val trajectory timeline plots to W&B in a single figure.
 
-        Creates plots showing full trajectory timelines with:
-        - Prediction scores across the entire trajectory
-        - Classification threshold line
-        - Binary predictions after thresholding
-        - Ground truth transition markers
-
-        Args:
-            trajectory_plots: List of trajectory plot data from trainer
-            epoch: Current epoch number
-            data_type: 'train' or 'val'
+        Creates a combined figure with train plots on left column and val plots on right.
         """
         import wandb
 
-        if len(trajectory_plots) == 0:
-            print(f"No {data_type} trajectory plots available")
+        if len(train_plots) == 0 and len(val_plots) == 0:
+            print(f"No trajectory timeline plots available")
             return
 
-        # Select a subset of trajectories to plot (max 6)
-        num_plots = min(6, len(trajectory_plots))
-        selected_indices = random.sample(range(len(trajectory_plots)), num_plots)
+        # Select subsets
+        max_plots_per_split = 4
+        num_train = min(max_plots_per_split, len(train_plots))
+        num_val = min(max_plots_per_split, len(val_plots))
 
-        print(f"Logging {num_plots} {data_type} trajectory timeline plots to wandb "
-              f"for epoch {epoch}...")
+        train_indices = random.sample(range(len(train_plots)), num_train) if num_train > 0 else []
+        val_indices = random.sample(range(len(val_plots)), num_val) if num_val > 0 else []
 
-        # Create subplot grid (2 columns)
-        num_rows = (num_plots + 1) // 2
-        fig, axes = plt.subplots(num_rows, 2, figsize=(16, 4 * num_rows))
-        if num_rows == 1:
+        # Determine grid layout
+        max_rows = max(num_train, num_val)
+        num_cols = 2 if (num_train > 0 and num_val > 0) else 1
+
+        fig, axes = plt.subplots(max_rows, num_cols, figsize=(10 * num_cols, 4 * max_rows))
+
+        # Handle single plot case
+        if max_rows == 1 and num_cols == 1:
+            axes = np.array([[axes]])
+        elif max_rows == 1:
             axes = axes.reshape(1, -1)
-        axes = axes.flatten()
+        elif num_cols == 1:
+            axes = axes.reshape(-1, 1)
 
-        for plot_idx, traj_idx in enumerate(selected_indices):
-            traj_plot_data = trajectory_plots[traj_idx]
-            ax = axes[plot_idx]
-            self._create_trajectory_timeline_plot(traj_plot_data, ax)
+        # Add column headers
+        if num_cols == 2:
+            fig.text(0.25, 0.98, 'TRAINING', ha='center', fontsize=14,
+                    fontweight='bold', color='blue')
+            fig.text(0.75, 0.98, 'VALIDATION', ha='center', fontsize=14,
+                    fontweight='bold', color='green')
+        elif num_train > 0:
+            fig.text(0.5, 0.98, 'TRAINING', ha='center', fontsize=14,
+                    fontweight='bold', color='blue')
+        else:
+            fig.text(0.5, 0.98, 'VALIDATION', ha='center', fontsize=14,
+                    fontweight='bold', color='green')
 
-        # Hide unused subplots
-        for ax in axes[num_plots:]:
+        # Plot training trajectories (left column or only column)
+        col_idx = 0
+        for row_idx, traj_idx in enumerate(train_indices):
+            ax = axes[row_idx, col_idx] if num_cols > 1 else axes[row_idx, 0]
+            self._create_trajectory_timeline_plot(train_plots[traj_idx], ax)
+
+        # Hide unused train slots
+        for row_idx in range(num_train, max_rows):
+            ax = axes[row_idx, col_idx] if num_cols > 1 else axes[row_idx, 0]
             ax.axis('off')
 
-        plt.tight_layout()
-        wandb.log({f"epoch_{epoch:03d}_{data_type}_trajectory_timelines": wandb.Image(fig)})
+        # Plot validation trajectories (right column or only column)
+        if num_val > 0:
+            col_idx = 1 if num_cols > 1 else 0
+            for row_idx, traj_idx in enumerate(val_indices):
+                ax = axes[row_idx, col_idx]
+                self._create_trajectory_timeline_plot(val_plots[traj_idx], ax)
+
+            # Hide unused val slots
+            if num_cols > 1:
+                for row_idx in range(num_val, max_rows):
+                    ax = axes[row_idx, col_idx]
+                    ax.axis('off')
+
+        plt.tight_layout(rect=[0, 0, 1, 0.97])
+        wandb.log({f"trajectories/epoch_{epoch:03d}_train_val_timelines": wandb.Image(fig)})
         plt.close(fig)
 
-        print(f"Logged {num_plots} {data_type} trajectory timeline plots to wandb")
+        print(f"Logged {num_train} train + {num_val} val trajectory timeline plots to wandb "
+              f"for epoch {epoch}")
 
     def _create_trajectory_timeline_plot(
         self,

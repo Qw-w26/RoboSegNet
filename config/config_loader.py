@@ -227,7 +227,27 @@ def validate_config(config: ExperimentConfig) -> None:
 
     Raises:
         ValueError: If configuration is invalid
+        FileNotFoundError: If required directories don't exist
     """
+    # Multi-task data validation
+    meta_path = Path(config.data.meta_dir)
+    if not meta_path.exists():
+        raise FileNotFoundError(f"meta_dir does not exist: {config.data.meta_dir}")
+
+    if not config.data.train_task_ids:
+        raise ValueError("train_task_ids cannot be empty")
+
+    # Validate all task directories exist
+    all_task_ids = set(config.data.train_task_ids) | set(config.data.eval_task_ids)
+
+    for task_id in all_task_ids:
+        task_dir = meta_path / f"task_{task_id}_processed"
+        if not task_dir.exists():
+            raise FileNotFoundError(
+                f"Task directory not found: {task_dir}\n"
+                f"Expected directory: task_{task_id}_processed in {config.data.meta_dir}"
+            )
+
     # Model validation
     if config.model.vocab_size <= 0:
         raise ValueError("vocab_size must be positive")

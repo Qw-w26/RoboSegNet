@@ -75,9 +75,11 @@ class DataConfig:
     Combines dataset, dataloader, and feature extraction settings.
 
     Attributes:
-        # Paths
-        splits_dir: Directory containing train/val/test splits
-        processed_dataset_dir: Directory with processed parquet files
+        # Multi-task configuration
+        meta_dir: Meta directory containing all task_*_processed folders
+        train_task_ids: List of task IDs for training (e.g., [327, 352, 356])
+        eval_task_ids: List of task IDs for evaluation (e.g., [357])
+                       If None, defaults to same as train_task_ids
         cache_dir: Directory for feature caching
 
         # Dataset parameters
@@ -102,9 +104,10 @@ class DataConfig:
         ray_num_workers: Number of Ray workers for parallel processing
         max_samples: Maximum samples to load (None = all)
     """
-    # Paths
-    splits_dir: str = './splits'
-    processed_dataset_dir: Optional[str] = None  # Auto-determined from splits_dir if None
+    # Multi-task configuration
+    meta_dir: str = './full_dataset'
+    train_task_ids: List[int] = field(default_factory=list)
+    eval_task_ids: Optional[List[int]] = None
     cache_dir: str = './cache'
 
     # Dataset parameters
@@ -130,9 +133,9 @@ class DataConfig:
     max_samples: Optional[int] = None
 
     def __post_init__(self):
-        """Set defaults for derived paths."""
-        if self.processed_dataset_dir is None:
-            self.processed_dataset_dir = str(Path(self.splits_dir) / 'processed_dataset')
+        """Set defaults for eval_task_ids."""
+        if self.eval_task_ids is None:
+            self.eval_task_ids = self.train_task_ids
 
 
 @dataclass

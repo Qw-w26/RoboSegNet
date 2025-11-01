@@ -1332,7 +1332,7 @@ def main():
         # This avoids nested Ray initialization and allows all GPUs to be used
         from data.dataset_builder import DatasetBuilder
         shared_builder = DatasetBuilder(
-            output_dir=output_dir / 'temp_processing',  # Temp dir for intermediate files
+            output_dir=output_dir / 'processed_dataset',
             extract_dino=args.extract_dino,
             extract_frames=args.extract_frames,
             dino_model=args.dino_model,
@@ -1398,28 +1398,18 @@ def main():
         print("Step 4: Merging processed datasets...")
         print(f"{'='*80}")
 
-        from data.dataset_builder import DatasetBuilder
-        final_builder = DatasetBuilder(
-            output_dir=output_dir / 'processed_dataset',
-            extract_dino=args.extract_dino,
-            extract_frames=args.extract_frames,
-            dino_model=args.dino_model,
-            target_fps=args.target_fps,
-            num_workers=args.num_workers
-        )
-
-        # Save merged splits
+        # Save merged splits using the shared builder
         if all_train_processed:
             print("\nSaving merged train split...")
-            final_builder._save_split(all_train_processed, 'train')
+            shared_builder._save_split(all_train_processed, 'train')
 
         if all_val_processed:
             print("\nSaving merged validation split...")
-            final_builder._save_split(all_val_processed, 'val')
+            shared_builder._save_split(all_val_processed, 'val')
 
         if all_test_processed:
             print("\nSaving merged test split...")
-            final_builder._save_split(all_test_processed, 'test')
+            shared_builder._save_split(all_test_processed, 'test')
 
         print(f"\n{'='*80}")
         print("DATASET BUILD COMPLETE")

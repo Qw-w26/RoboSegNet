@@ -10,6 +10,12 @@ from .parquet_loader import (
     print_split_statistics,
 )
 
+# Multi-task data loading
+from .multi_task_loader import (
+    load_multi_task_split,
+    get_multi_task_statistics,
+)
+
 # Legacy dataset classes (used by prepare_data.py)
 from .base_dataset import (
     BaseSegmentationDataset,
@@ -26,6 +32,10 @@ __all__ = [
     'load_parquet_split',
     'get_split_statistics',
     'print_split_statistics',
+
+    # Multi-task loading
+    'load_multi_task_split',
+    'get_multi_task_statistics',
 
     # Legacy classes (for prepare_data.py)
     'BaseSegmentationDataset',

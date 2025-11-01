@@ -18,7 +18,9 @@ model:
   feature_noise_std: 0.05
 
 data:
-  splits_dir: ./splits
+  meta_dir: ./full_dataset
+  train_task_ids: [356]
+  eval_task_ids: null  # Same as train_task_ids
   cache_dir: ./cache
 
   # Dataset parameters

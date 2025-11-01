@@ -18,7 +18,9 @@ model:
   feature_noise_std: 0.0  # Disable for debugging
 
 data:
-  splits_dir: ./splits
+  meta_dir: ./full_dataset
+  train_task_ids: [327]  # Use task 327 for debugging
+  eval_task_ids: null  # Same as train_task_ids
   cache_dir: ./cache
 
   window_size: 180

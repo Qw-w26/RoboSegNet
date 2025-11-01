@@ -122,8 +122,23 @@ def main():
     print("Loading data...")
     print("="*80)
 
-    train_trajectories = load_parquet_split('train', splits_dir=config.data.splits_dir)
-    val_trajectories = load_parquet_split('val', splits_dir=config.data.splits_dir)
+    from data import load_multi_task_split
+
+    print(f"Meta directory: {config.data.meta_dir}")
+    print(f"Training tasks: {config.data.train_task_ids}")
+    print(f"Evaluation tasks: {config.data.eval_task_ids}")
+
+    train_trajectories = load_multi_task_split(
+        'train',
+        task_ids=config.data.train_task_ids,
+        meta_dir=config.data.meta_dir
+    )
+
+    val_trajectories = load_multi_task_split(
+        'val',
+        task_ids=config.data.eval_task_ids,
+        meta_dir=config.data.meta_dir
+    )
 
     # Create datasets
     dataset_config = TrainingDatasetConfig(
