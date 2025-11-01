@@ -23,7 +23,7 @@ import os
 warnings.filterwarnings("ignore", category=UserWarning)
 
 
-@ray.remote(num_gpus=0.25)  # Allocate partial GPU per task
+@ray.remote(num_cpus = 0.1, num_gpus=0.05)  # Allocate partial GPU per task
 class TrajectoryProcessor:
     """Ray actor for processing trajectories with persistent DINO model."""
 
@@ -43,11 +43,19 @@ class TrajectoryProcessor:
         self.dino_model_name = dino_model_name
         self.frames_dir = Path(frames_dir) if frames_dir else None
 
-        # Set device
-        if device is None:
-            self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        else:
-            self.device = device
+        # Set device - Ray handles GPU assignment via CUDA_VISIBLE_DEVICES
+        # When Ray creates actors with num_gpus, it sets CUDA_VISIBLE_DEVICES automatically
+        # PyTorch will respect this and 'cuda' will map to the correct GPU
+        if device is not None and device != 'cuda' and not device.startswith('cuda:'):
+            raise ValueError(f"Invalid device '{device}'. Leave as None for auto-detection or use 'cuda'")
+
+        # Auto-detect: Ray sets CUDA_VISIBLE_DEVICES for GPU actors
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "GPU is required for DINO processing but CUDA is not available. "
+                "Ensure Ray is initialized with GPUs and actor has num_gpus specified."
+            )
+        self.device = 'cuda'
 
         # Initialize DINO model if needed
         self.dino_model = None
@@ -57,25 +65,21 @@ class TrajectoryProcessor:
 
     def _init_dino_model(self):
         """Initialize DINOv3 model for feature extraction."""
-        try:
-            from transformers import AutoModel, AutoProcessor
+        from transformers import AutoModel, AutoProcessor
 
-            # Load DINOv3 model from HuggingFace
-            self.dino_model = AutoModel.from_pretrained(
-                self.dino_model_name,
-                trust_remote_code=True
-            )
-            self.dino_model = self.dino_model.to(self.device)
-            self.dino_model.eval()
+        # Load DINOv3 model from HuggingFace
+        self.dino_model = AutoModel.from_pretrained(
+            self.dino_model_name,
+            trust_remote_code=True
+        )
+        self.dino_model = self.dino_model.to(self.device)
+        self.dino_model.eval()
 
-            # Load processor for preprocessing
-            self.dino_processor = AutoProcessor.from_pretrained(
-                self.dino_model_name,
-                trust_remote_code=True
-            )
-        except Exception as e:
-            print(f"Warning: Could not initialize DINO model: {e}")
-            self.extract_dino = False
+        # Load processor for preprocessing
+        self.dino_processor = AutoProcessor.from_pretrained(
+            self.dino_model_name,
+            trust_remote_code=True
+        )
 
     def process_trajectory(self, trajectory_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Process a single trajectory."""
@@ -100,38 +104,37 @@ class TrajectoryProcessor:
             if self.extract_dino or self.extract_frames:
                 # Validate video paths exist
                 if 'video_paths' not in trajectory_data or not trajectory_data['video_paths']:
-                    raise ValueError(
-                        f"Trajectory {trajectory_id} has no video_paths. "
-                        f"Cannot extract DINO features or frames without videos. "
-                        f"Please ensure video files are available in the source data."
-                    )
+                    print(f"\n⚠️  WARNING: Trajectory {trajectory_id} has no video_paths. Skipping DINO/frame extraction.")
+                    # Continue without visual features
+                    dino_features = None
+                    image_paths = None
+                else:
+                    video_paths = trajectory_data['video_paths']
+                    if not isinstance(video_paths, dict) or 'head_color' not in video_paths:
+                        raise ValueError(
+                            f"Trajectory {trajectory_id} missing 'head_color' camera in video_paths. "
+                            f"Available cameras: {list(video_paths.keys()) if isinstance(video_paths, dict) else 'none'}"
+                        )
 
-                video_paths = trajectory_data['video_paths']
-                if not isinstance(video_paths, dict) or 'head_color' not in video_paths:
-                    raise ValueError(
-                        f"Trajectory {trajectory_id} missing 'head_color' camera in video_paths. "
-                        f"Available cameras: {list(video_paths.keys()) if isinstance(video_paths, dict) else 'none'}"
-                    )
+                    video_path = Path(video_paths['head_color'])
 
-                video_path = Path(video_paths['head_color'])
+                    # Validate video file exists
+                    if not video_path.exists():
+                        raise FileNotFoundError(
+                            f"Video file not found for trajectory {trajectory_id}: {video_path}\n"
+                            f"Please ensure video files are available at the correct location."
+                        )
 
-                # Validate video file exists
-                if not video_path.exists():
-                    raise FileNotFoundError(
-                        f"Video file not found for trajectory {trajectory_id}: {video_path}\n"
-                        f"Please ensure video files are available at the correct location."
-                    )
+                    if not video_path.is_file():
+                        raise ValueError(
+                            f"Video path is not a file for trajectory {trajectory_id}: {video_path}"
+                        )
 
-                if not video_path.is_file():
-                    raise ValueError(
-                        f"Video path is not a file for trajectory {trajectory_id}: {video_path}"
-                    )
-
-                # Extract features from validated video path
-                if self.extract_dino:
-                    dino_features = self._extract_dino_features(video_path)
-                if self.extract_frames:
-                    image_paths = self._extract_and_save_frames(video_path, trajectory_id)
+                    # Extract features from validated video path
+                    if self.extract_dino:
+                        dino_features = self._extract_dino_features(video_path)
+                    if self.extract_frames:
+                        image_paths = self._extract_and_save_frames(video_path, trajectory_id)
 
             # If not extracting visual features, still store video paths if available
             elif 'video_paths' in trajectory_data and trajectory_data['video_paths']:
@@ -351,63 +354,13 @@ class TrajectoryProcessor:
             return None
 
 
-@ray.remote
-def process_trajectory_batch(
-    trajectories: List[Dict[str, Any]],
-    processor_config: Dict[str, Any]
-) -> List[Optional[Dict[str, Any]]]:
-    """Process a batch of trajectories without DINO (for CPU-only processing)."""
-    results = []
-
-    for traj_data in trajectories:
-        try:
-            # Simple processing without DINO
-            trajectory_id = traj_data['trajectory_id']
-            task_id = traj_data['task_id']
-
-            # Create frame labels
-            segments = traj_data.get('segments', [])
-            if segments:
-                max_frame = max(seg['end_frame'] for seg in segments)
-                frame_labels = np.zeros(max_frame, dtype=int)
-                for seg in segments:
-                    frame_labels[seg['start_frame']:seg['end_frame']] = seg.get('segment_id', 0) + 1
-            else:
-                frame_labels = np.array([])
-
-            result = {
-                'trajectory_id': trajectory_id,
-                'task_id': task_id,
-                'episode_id': traj_data.get('episode_id', 0),
-                'task_name': traj_data.get('task_name', ''),
-                'segments': segments,
-                'frame_labels': frame_labels.tolist(),
-                'proprioception': None,
-                'proprio_timestamps': None,
-                'dino_features': None,
-                'image_paths': None,
-                'video_paths': traj_data.get('video_paths', {}),
-                'total_frames': traj_data.get('total_frames', 0),
-                'fps': processor_config.get('target_fps', 5.0),
-                'metadata': traj_data.get('metadata', {})
-            }
-
-            results.append(result)
-
-        except Exception as e:
-            print(f"Error processing trajectory {traj_data.get('trajectory_id', 'unknown')}: {e}")
-            results.append(None)
-
-    return results
-
-
 class RayDatasetBuilder:
     """Dataset builder using Ray for parallel processing."""
 
     def __init__(
         self,
         num_workers: int = None,
-        num_gpus_per_worker: float = 0.25,
+        num_gpus_per_worker: float = 0.05,  # Must match @ray.remote(num_gpus=0.05) in TrajectoryProcessor
         frames_dir: str = None,
         **processor_config
     ):
@@ -416,7 +369,7 @@ class RayDatasetBuilder:
 
         Args:
             num_workers: Number of Ray workers (None = auto-detect)
-            num_gpus_per_worker: GPUs allocated per worker
+            num_gpus_per_worker: GPUs allocated per worker (must match TrajectoryProcessor decorator)
             frames_dir: Directory to save extracted frames (required if extract_frames=True)
             **processor_config: Configuration passed to TrajectoryProcessor
         """
@@ -426,25 +379,35 @@ class RayDatasetBuilder:
         self.processor_config = processor_config
         self.processor_config['frames_dir'] = frames_dir
 
+        # Determine resources - require GPUs
+        if ray.is_initialized():
+            cluster_resources = ray.cluster_resources()
+            num_gpus = int(cluster_resources.get('GPU', 0))
+            num_cpus = int(cluster_resources.get('CPU', os.cpu_count()))
+        else:
+            num_cpus = os.cpu_count()
+            num_gpus = torch.cuda.device_count()
+
+        # Require GPU availability
+        if num_gpus == 0:
+            raise RuntimeError("No GPUs available. GPU is required for DINO processing.")
+
+        # Auto-detect optimal number of workers if not specified
+        if self.num_workers is None:
+            # Each worker needs num_gpus_per_worker GPUs (from @ray.remote decorator)
+            max_gpu_workers = int(num_gpus / self.num_gpus_per_worker)
+            # Also respect CPU limits (each worker needs 1 CPU)
+            max_cpu_workers = num_cpus
+            self.num_workers = min(max_gpu_workers, max_cpu_workers)
+            print(f"Auto-detected {self.num_workers} workers (limited by {num_gpus} GPUs, each worker uses {self.num_gpus_per_worker} GPU)")
+
         # Initialize Ray if not already initialized
         if not ray.is_initialized():
-            # Determine resources
-            num_cpus = os.cpu_count()
-            num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
-
-            if self.num_workers is None:
-                # Auto-detect optimal number of workers
-                if processor_config.get('extract_dino', False) and num_gpus > 0:
-                    # For DINO extraction, use GPU workers
-                    self.num_workers = min(int(num_gpus / self.num_gpus_per_worker), num_cpus)
-                else:
-                    # For non-DINO processing, use CPU workers
-                    self.num_workers = num_cpus
-
             print(f"Initializing Ray with {num_cpus} CPUs and {num_gpus} GPUs")
             print(f"Using {self.num_workers} workers")
-
             ray.init(num_cpus=num_cpus, num_gpus=num_gpus, ignore_reinit_error=True)
+        else:
+            print(f"Ray already initialized. Using {self.num_workers} workers")
 
     def process_dataset(
         self,
@@ -482,14 +445,8 @@ class RayDatasetBuilder:
                 traj_dict = traj
             trajectory_dicts.append(traj_dict)
 
-        # Process with Ray
-        if self.processor_config.get('extract_dino', False):
-            # Use GPU actors for DINO processing
-            results = self._process_with_actors(trajectory_dicts)
-        else:
-            # Use simple remote functions for CPU processing
-            results = self._process_with_remote_functions(trajectory_dicts, batch_size)
-
+        # Process with Ray using GPU actors
+        results = self._process_with_actors(trajectory_dicts)
         return results
 
     def _process_with_actors(self, trajectory_dicts: List[Dict]) -> List[Dict]:
@@ -512,28 +469,6 @@ class RayDatasetBuilder:
 
         # Filter out None results
         results = [r for r in results if r is not None]
-
-        return results
-
-    def _process_with_remote_functions(self, trajectory_dicts: List[Dict], batch_size: int) -> List[Dict]:
-        """Process using remote functions (for non-DINO processing)."""
-        # Split into batches
-        batches = [trajectory_dicts[i:i+batch_size]
-                  for i in range(0, len(trajectory_dicts), batch_size)]
-
-        # Process batches in parallel
-        futures = []
-        for batch in batches:
-            future = process_trajectory_batch.remote(batch, self.processor_config)
-            futures.append(future)
-
-        # Collect results
-        batch_results = ray.get(futures)
-
-        # Flatten results
-        results = []
-        for batch in batch_results:
-            results.extend([r for r in batch if r is not None])
 
         return results
 

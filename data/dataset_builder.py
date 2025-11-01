@@ -153,7 +153,7 @@ class DatasetBuilder:
         extract_frames: bool = False,
         dino_model: str = 'facebook/dinov3-vitl16-pretrain-lvd1689m',
         target_fps: float = 5.0,
-        device: str = 'cuda' if torch.cuda.is_available() else 'cpu',
+        device: str = None,
         num_workers: int = None
     ):
         """
@@ -165,7 +165,7 @@ class DatasetBuilder:
             extract_frames: Whether to extract individual frames
             dino_model: DINO model variant to use (HuggingFace model name)
             target_fps: Target FPS for frame extraction (if different from video)
-            device: Device for DINO extraction
+            device: Device for DINO extraction (leave as None for Ray auto-detection, not used in Ray mode)
             num_workers: Number of Ray workers (None = auto-detect)
         """
         self.output_dir = Path(output_dir)
@@ -173,7 +173,6 @@ class DatasetBuilder:
         self.extract_frames = extract_frames
         self.dino_model_name = dino_model
         self.target_fps = target_fps
-        self.device = device
         self.num_workers = num_workers
 
         # Create output directories
@@ -186,6 +185,7 @@ class DatasetBuilder:
             self.frames_dir.mkdir(exist_ok=True)
 
         # Initialize Ray processor
+        # Note: Don't pass device parameter - let Ray workers auto-detect GPU via CUDA_VISIBLE_DEVICES
         from .ray_processor import RayDatasetBuilder
         self.ray_processor = RayDatasetBuilder(
             num_workers=num_workers,
@@ -193,8 +193,7 @@ class DatasetBuilder:
             extract_dino=extract_dino,
             extract_frames=extract_frames,
             dino_model_name=dino_model,
-            target_fps=target_fps,
-            device=device
+            target_fps=target_fps
         )
 
         print(f"Using Ray parallel processing with {self.ray_processor.num_workers} workers")

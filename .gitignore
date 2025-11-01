@@ -99,6 +99,7 @@ htmlcov/
 .dmypy.json
 dmypy.json
 
+full_dataset/
 
 splits/
 data_task_356/

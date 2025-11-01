@@ -239,9 +239,16 @@ class Trainer:
                 print(f" | Val Loss: {val_loss:.4f}, P: {val_results.get('precision', 0.0):.3f}, R: {val_results.get('recall', 0.0):.3f}, F1: {val_f1:.3f}, IoU: {val_results.get('avg_iou', 0.0):.3f}", end='')
             print(f" | LR: {current_lr:.6f}")
 
-            # Print metrics by tolerance
+            # Print metrics by tolerance for training dataset
+            if 'metrics_by_tolerance' in train_results and train_results['metrics_by_tolerance']:
+                print("  Training metrics by tolerance:")
+                for tol_key in sorted(train_results['metrics_by_tolerance'].keys()):
+                    tol_metrics = train_results['metrics_by_tolerance'][tol_key]
+                    print(f"    @{tol_key}: P={tol_metrics['precision']:.3f}, R={tol_metrics['recall']:.3f}, F1={tol_metrics['f1_score']:.3f}, IoU={tol_metrics['avg_iou']:.3f}, Dist={tol_metrics['avg_peak_distance']:.3f}s")
+
+            # Print metrics by tolerance for validation dataset
             if 'metrics_by_tolerance' in val_results and val_results['metrics_by_tolerance']:
-                print("  Metrics by tolerance:")
+                print("  Validation metrics by tolerance:")
                 for tol_key in sorted(val_results['metrics_by_tolerance'].keys()):
                     tol_metrics = val_results['metrics_by_tolerance'][tol_key]
                     print(f"    @{tol_key}: P={tol_metrics['precision']:.3f}, R={tol_metrics['recall']:.3f}, F1={tol_metrics['f1_score']:.3f}, IoU={tol_metrics['avg_iou']:.3f}, Dist={tol_metrics['avg_peak_distance']:.3f}s")

@@ -197,7 +197,16 @@ def load_parquet_split(
 
     # Determine processed directory
     if processed_dir is None:
-        processed_dir = Path(splits_dir) / 'processed_dataset'
+        # Try new structure first (parquet files directly in splits_dir)
+        splits_path = Path(splits_dir)
+        parquet_file_new = splits_path / f"{split_name}_processed.parquet"
+
+        # If file exists in new structure, use splits_dir directly
+        if parquet_file_new.exists():
+            processed_dir = splits_path
+        else:
+            # Fall back to old structure (processed_dataset subdirectory)
+            processed_dir = splits_path / 'processed_dataset'
     else:
         processed_dir = Path(processed_dir)
 

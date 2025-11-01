@@ -465,9 +465,11 @@ class SegmentBoundaryDataset(torch.utils.data.Dataset):
         if len(self.samples) == 0:
             return
 
-        # Initialize Ray if not already initialized
+        # Initialize Ray with GPUs if not already initialized
         if not ray.is_initialized():
-            ray.init(ignore_reinit_error=True)
+            import torch
+            num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
+            ray.init(num_gpus=num_gpus, ignore_reinit_error=True)
 
         print(f"Pre-computing DINO features for {len(self.samples)} samples...")
         print(f"Creating {self.num_ray_workers} Ray actors...")
