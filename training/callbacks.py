@@ -178,9 +178,19 @@ class WandBCallback(Callback):
         if 'learning_rate' in logs:
             metrics['learning_rate'] = logs['learning_rate']
 
-        # Evaluation metrics (organized by tolerance)
+        # Separate tolerance-based metrics from regular metrics
         eval_metrics = {}
         task_metrics = {}
+        tolerance_metrics = {
+            'train': {},
+            'val': {},
+            'train_per_task': {},
+            'val_per_task': {},
+            'train_in_dist': {},
+            'val_in_dist': {},
+            'train_out_dist': {},
+            'val_out_dist': {}
+        }
 
         for key, value in logs.items():
             if not isinstance(value, (int, float)):
@@ -190,20 +200,122 @@ class WandBCallback(Callback):
             if key in ['epoch', 'train_loss', 'val_loss', 'learning_rate']:
                 continue
 
-            # Organize by category
-            if 'train_' in key:
-                eval_metrics[f'train/{key.replace("train_", "")}'] = value
-            elif 'val_' in key:
-                eval_metrics[f'val/{key.replace("val_", "")}'] = value
-            elif 'task_' in key:
-                # Task-specific metrics for multi-task training
-                task_metrics[key] = value
+            # Check if this is a tolerance-based metric (contains @)
+            if '@' in key:
+                # Parse different types of tolerance metrics
+                if key.startswith('train_task'):
+                    # Per-task training metric: train_task327_precision_@1s
+                    parts = key[6:].split('_', 1)  # Remove 'train_' and split on first _
+                    task_id = parts[0].replace('task', '')
+                    rest = parts[1] if len(parts) > 1 else ''
+                    metric_name, tol = rest.split('@', 1)
+                    metric_name = metric_name.rstrip('_')
+
+                    if task_id not in tolerance_metrics['train_per_task']:
+                        tolerance_metrics['train_per_task'][task_id] = {}
+                    if metric_name not in tolerance_metrics['train_per_task'][task_id]:
+                        tolerance_metrics['train_per_task'][task_id][metric_name] = {}
+                    tolerance_metrics['train_per_task'][task_id][metric_name][tol] = value
+                    eval_metrics[f'train/task{task_id}_{metric_name}_@{tol}'] = value
+
+                elif key.startswith('val_task'):
+                    # Per-task validation metric: val_task327_precision_@1s
+                    parts = key[4:].split('_', 1)  # Remove 'val_' and split on first _
+                    task_id = parts[0].replace('task', '')
+                    rest = parts[1] if len(parts) > 1 else ''
+                    metric_name, tol = rest.split('@', 1)
+                    metric_name = metric_name.rstrip('_')
+
+                    if task_id not in tolerance_metrics['val_per_task']:
+                        tolerance_metrics['val_per_task'][task_id] = {}
+                    if metric_name not in tolerance_metrics['val_per_task'][task_id]:
+                        tolerance_metrics['val_per_task'][task_id][metric_name] = {}
+                    tolerance_metrics['val_per_task'][task_id][metric_name][tol] = value
+                    eval_metrics[f'val/task{task_id}_{metric_name}_@{tol}'] = value
+
+                elif key.startswith('train_in_dist_'):
+                    # In-distribution training metric: train_in_dist_precision_@1s
+                    rest = key[15:]  # Remove 'train_in_dist_'
+                    metric_name, tol = rest.split('@', 1)
+                    metric_name = metric_name.rstrip('_')
+
+                    if metric_name not in tolerance_metrics['train_in_dist']:
+                        tolerance_metrics['train_in_dist'][metric_name] = {}
+                    tolerance_metrics['train_in_dist'][metric_name][tol] = value
+                    eval_metrics[f'train/in_dist_{metric_name}_@{tol}'] = value
+
+                elif key.startswith('train_out_dist_'):
+                    # Out-of-distribution training metric: train_out_dist_precision_@1s
+                    rest = key[16:]  # Remove 'train_out_dist_'
+                    metric_name, tol = rest.split('@', 1)
+                    metric_name = metric_name.rstrip('_')
+
+                    if metric_name not in tolerance_metrics['train_out_dist']:
+                        tolerance_metrics['train_out_dist'][metric_name] = {}
+                    tolerance_metrics['train_out_dist'][metric_name][tol] = value
+                    eval_metrics[f'train/out_dist_{metric_name}_@{tol}'] = value
+
+                elif key.startswith('val_in_dist_'):
+                    # In-distribution validation metric: val_in_dist_precision_@1s
+                    rest = key[13:]  # Remove 'val_in_dist_'
+                    metric_name, tol = rest.split('@', 1)
+                    metric_name = metric_name.rstrip('_')
+
+                    if metric_name not in tolerance_metrics['val_in_dist']:
+                        tolerance_metrics['val_in_dist'][metric_name] = {}
+                    tolerance_metrics['val_in_dist'][metric_name][tol] = value
+                    eval_metrics[f'val/in_dist_{metric_name}_@{tol}'] = value
+
+                elif key.startswith('val_out_dist_'):
+                    # Out-of-distribution validation metric: val_out_dist_precision_@1s
+                    rest = key[14:]  # Remove 'val_out_dist_'
+                    metric_name, tol = rest.split('@', 1)
+                    metric_name = metric_name.rstrip('_')
+
+                    if metric_name not in tolerance_metrics['val_out_dist']:
+                        tolerance_metrics['val_out_dist'][metric_name] = {}
+                    tolerance_metrics['val_out_dist'][metric_name][tol] = value
+                    eval_metrics[f'val/out_dist_{metric_name}_@{tol}'] = value
+
+                elif key.startswith('train_'):
+                    # Overall training metric: train_precision_@1s
+                    rest = key[6:]  # Remove 'train_'
+                    metric_name, tol = rest.split('@', 1)
+                    metric_name = metric_name.rstrip('_')
+
+                    if metric_name not in tolerance_metrics['train']:
+                        tolerance_metrics['train'][metric_name] = {}
+                    tolerance_metrics['train'][metric_name][tol] = value
+                    eval_metrics[f'train/{metric_name}_@{tol}'] = value
+
+                elif key.startswith('val_'):
+                    # Overall validation metric: val_precision_@1s
+                    rest = key[4:]  # Remove 'val_'
+                    metric_name, tol = rest.split('@', 1)
+                    metric_name = metric_name.rstrip('_')
+
+                    if metric_name not in tolerance_metrics['val']:
+                        tolerance_metrics['val'][metric_name] = {}
+                    tolerance_metrics['val'][metric_name][tol] = value
+                    eval_metrics[f'val/{metric_name}_@{tol}'] = value
             else:
-                metrics[key] = value
+                # Regular metrics (non-tolerance)
+                if 'train_' in key:
+                    eval_metrics[f'train/{key.replace("train_", "")}'] = value
+                elif 'val_' in key:
+                    eval_metrics[f'val/{key.replace("val_", "")}'] = value
+                elif 'task_' in key:
+                    # Task-specific metrics for multi-task training
+                    task_metrics[key] = value
+                else:
+                    metrics[key] = value
 
         # Log all metrics in organized groups
         all_metrics = {**metrics, **loss_metrics, **eval_metrics, **task_metrics}
         wandb.log(all_metrics)
+
+        # Create and log merged tolerance plots
+        self._log_merged_tolerance_plots(tolerance_metrics, epoch)
 
         # Create and log summary table every epoch for easy viewing
         if epoch % 5 == 0 or epoch == 0:  # Log every 5 epochs to reduce clutter
@@ -238,6 +350,267 @@ class WandBCallback(Callback):
         if self.run is not None:
             import wandb
             wandb.finish()
+
+    def _log_merged_tolerance_plots(
+        self,
+        tolerance_metrics: Dict[str, Dict[str, Dict[str, float]]],
+        epoch: int
+    ) -> None:
+        """Create and log merged plots showing all tolerances in one figure.
+
+        Creates separate plots for:
+        - Overall metrics (all tasks)
+        - In-distribution metrics (training set tasks)
+        - Out-of-distribution metrics (non-training set tasks)
+        - Per-task metrics
+
+        Args:
+            tolerance_metrics: Nested dict with structure:
+                {'train': {'precision': {'1s': 0.8, '2s': 0.9}, ...},
+                 'val': {...},
+                 'train_per_task': {'327': {'precision': {'1s': ...}}, ...},
+                 'train_in_dist': {...},
+                 'train_out_dist': {...}}
+            epoch: Current epoch number
+        """
+        import wandb
+
+        # Track history across epochs for line plots
+        if not hasattr(self, '_tolerance_history'):
+            self._tolerance_history = {
+                'train': {}, 'val': {},
+                'train_per_task': {}, 'val_per_task': {},
+                'train_in_dist': {}, 'val_in_dist': {},
+                'train_out_dist': {}, 'val_out_dist': {}
+            }
+
+        # Update history with current epoch's data
+        # Overall metrics
+        for split in ['train', 'val']:
+            if split in tolerance_metrics:
+                for metric_name, tol_values in tolerance_metrics[split].items():
+                    if metric_name not in self._tolerance_history[split]:
+                        self._tolerance_history[split][metric_name] = {}
+                    for tol, value in tol_values.items():
+                        if tol not in self._tolerance_history[split][metric_name]:
+                            self._tolerance_history[split][metric_name][tol] = []
+                        self._tolerance_history[split][metric_name][tol].append(value)
+
+        # In-dist and out-dist metrics
+        for group in ['in_dist', 'out_dist']:
+            for split in ['train', 'val']:
+                key = f'{split}_{group}'
+                if key in tolerance_metrics:
+                    for metric_name, tol_values in tolerance_metrics[key].items():
+                        if metric_name not in self._tolerance_history[key]:
+                            self._tolerance_history[key][metric_name] = {}
+                        for tol, value in tol_values.items():
+                            if tol not in self._tolerance_history[key][metric_name]:
+                                self._tolerance_history[key][metric_name][tol] = []
+                            self._tolerance_history[key][metric_name][tol].append(value)
+
+        # Per-task metrics
+        for split in ['train', 'val']:
+            key = f'{split}_per_task'
+            if key in tolerance_metrics:
+                for task_id, task_data in tolerance_metrics[key].items():
+                    if task_id not in self._tolerance_history[key]:
+                        self._tolerance_history[key][task_id] = {}
+                    for metric_name, tol_values in task_data.items():
+                        if metric_name not in self._tolerance_history[key][task_id]:
+                            self._tolerance_history[key][task_id][metric_name] = {}
+                        for tol, value in tol_values.items():
+                            if tol not in self._tolerance_history[key][task_id][metric_name]:
+                                self._tolerance_history[key][task_id][metric_name][tol] = []
+                            self._tolerance_history[key][task_id][metric_name][tol].append(value)
+
+        # Create merged plots for key metrics
+        key_metrics = ['precision', 'recall', 'f1_score', 'avg_iou']
+
+        # 1. Overall metrics (all tasks)
+        self._create_and_log_tolerance_plots(
+            key_metrics, 'train', 'val', 'overall',
+            'Overall Metrics (All Tasks)', wandb, epoch
+        )
+
+        # 2. In-distribution metrics (training set tasks)
+        self._create_and_log_tolerance_plots(
+            key_metrics, 'train_in_dist', 'val_in_dist', 'in_distribution',
+            'In-Distribution (Training Set)', wandb, epoch
+        )
+
+        # 3. Out-of-distribution metrics (non-training set tasks)
+        self._create_and_log_tolerance_plots(
+            key_metrics, 'train_out_dist', 'val_out_dist', 'out_distribution',
+            'Out-of-Distribution (Non-Training Set)', wandb, epoch
+        )
+
+        # 4. Per-task metrics
+        self._create_per_task_tolerance_plots(key_metrics, wandb, epoch)
+
+        print(f"Logged merged tolerance plots for epoch {epoch}")
+
+    def _create_and_log_tolerance_plots(
+        self,
+        key_metrics: List[str],
+        train_key: str,
+        val_key: str,
+        log_prefix: str,
+        title_prefix: str,
+        wandb,
+        epoch: int
+    ) -> None:
+        """Helper to create and log tolerance plots for a specific group."""
+        for metric_name in key_metrics:
+            # Check if this metric exists in either split
+            has_train = (train_key in self._tolerance_history and
+                        metric_name in self._tolerance_history[train_key])
+            has_val = (val_key in self._tolerance_history and
+                      metric_name in self._tolerance_history[val_key])
+
+            if not has_train and not has_val:
+                continue
+
+            # Create figure with subplots (one for train, one for val)
+            num_plots = sum([has_train, has_val])
+            fig, axes = plt.subplots(1, num_plots, figsize=(8 * num_plots, 6))
+
+            if num_plots == 1:
+                axes = [axes]
+
+            plot_idx = 0
+
+            # Plot training metrics
+            if has_train:
+                ax = axes[plot_idx]
+                self._plot_tolerance_lines(
+                    ax,
+                    self._tolerance_history[train_key][metric_name],
+                    title=f'{title_prefix} - Training {metric_name.replace("_", " ").title()}',
+                    metric_name=metric_name
+                )
+                plot_idx += 1
+
+            # Plot validation metrics
+            if has_val:
+                ax = axes[plot_idx]
+                self._plot_tolerance_lines(
+                    ax,
+                    self._tolerance_history[val_key][metric_name],
+                    title=f'{title_prefix} - Validation {metric_name.replace("_", " ").title()}',
+                    metric_name=metric_name
+                )
+
+            plt.tight_layout()
+            wandb.log({f'metrics_by_tolerance/{log_prefix}/{metric_name}': wandb.Image(fig)})
+            plt.close(fig)
+
+    def _create_per_task_tolerance_plots(
+        self,
+        key_metrics: List[str],
+        wandb,
+        epoch: int
+    ) -> None:
+        """Create separate tolerance plots for each task."""
+        # Get all unique task IDs from both train and val
+        all_task_ids = set()
+        if 'train_per_task' in self._tolerance_history:
+            all_task_ids.update(self._tolerance_history['train_per_task'].keys())
+        if 'val_per_task' in self._tolerance_history:
+            all_task_ids.update(self._tolerance_history['val_per_task'].keys())
+
+        # Create plots for each task
+        for task_id in sorted(all_task_ids):
+            for metric_name in key_metrics:
+                has_train = (task_id in self._tolerance_history.get('train_per_task', {}) and
+                           metric_name in self._tolerance_history['train_per_task'][task_id])
+                has_val = (task_id in self._tolerance_history.get('val_per_task', {}) and
+                          metric_name in self._tolerance_history['val_per_task'][task_id])
+
+                if not has_train and not has_val:
+                    continue
+
+                # Create figure with subplots
+                num_plots = sum([has_train, has_val])
+                fig, axes = plt.subplots(1, num_plots, figsize=(8 * num_plots, 6))
+
+                if num_plots == 1:
+                    axes = [axes]
+
+                plot_idx = 0
+
+                # Plot training metrics for this task
+                if has_train:
+                    ax = axes[plot_idx]
+                    self._plot_tolerance_lines(
+                        ax,
+                        self._tolerance_history['train_per_task'][task_id][metric_name],
+                        title=f'Task {task_id} - Training {metric_name.replace("_", " ").title()}',
+                        metric_name=metric_name
+                    )
+                    plot_idx += 1
+
+                # Plot validation metrics for this task
+                if has_val:
+                    ax = axes[plot_idx]
+                    self._plot_tolerance_lines(
+                        ax,
+                        self._tolerance_history['val_per_task'][task_id][metric_name],
+                        title=f'Task {task_id} - Validation {metric_name.replace("_", " ").title()}',
+                        metric_name=metric_name
+                    )
+
+                plt.tight_layout()
+                wandb.log({f'metrics_by_tolerance/per_task/task{task_id}/{metric_name}': wandb.Image(fig)})
+                plt.close(fig)
+
+    def _plot_tolerance_lines(
+        self,
+        ax: plt.Axes,
+        tolerance_data: Dict[str, List[float]],
+        title: str,
+        metric_name: str
+    ) -> None:
+        """Plot lines for each tolerance on the same axes.
+
+        Args:
+            ax: Matplotlib axes
+            tolerance_data: Dict mapping tolerance (e.g., '1s') to list of values across epochs
+            title: Plot title
+            metric_name: Name of the metric being plotted
+        """
+        # Sort tolerances for consistent ordering
+        sorted_tolerances = sorted(tolerance_data.keys(), key=lambda x: float(x.rstrip('s')))
+
+        # Color map for different tolerances
+        colors = plt.cm.viridis(np.linspace(0, 0.9, len(sorted_tolerances)))
+
+        for idx, tol in enumerate(sorted_tolerances):
+            values = tolerance_data[tol]
+            epochs = list(range(len(values)))
+
+            ax.plot(
+                epochs,
+                values,
+                marker='o',
+                linewidth=2,
+                markersize=6,
+                label=f'@{tol}',
+                color=colors[idx],
+                alpha=0.8
+            )
+
+        ax.set_xlabel('Epoch', fontsize=12)
+        ax.set_ylabel(metric_name.replace('_', ' ').title(), fontsize=12)
+        ax.set_title(title, fontsize=14, fontweight='bold')
+        ax.legend(title='Tolerance', fontsize=10, title_fontsize=11)
+        ax.grid(True, alpha=0.3, linestyle='--')
+
+        # Set y-axis limits based on metric type
+        if metric_name in ['precision', 'recall', 'f1_score']:
+            ax.set_ylim(-0.05, 1.05)
+        elif metric_name == 'avg_iou':
+            ax.set_ylim(-0.05, 1.05)
 
     def _log_metrics_summary_table(self, logs: Dict[str, Any], epoch: int) -> None:
         """Create and log a summary table of key metrics."""

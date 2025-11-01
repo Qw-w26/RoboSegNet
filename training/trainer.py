@@ -219,6 +219,40 @@ class Trainer:
                     for metric_name, metric_value in tol_metrics.items():
                         logs[f'val_{metric_name}_@{tol_key}'] = metric_value
 
+            # Add per-task metrics
+            if 'metrics_by_task' in train_results:
+                for task_id, task_metrics in train_results['metrics_by_task'].items():
+                    for tol_key, tol_metrics in task_metrics.items():
+                        for metric_name, metric_value in tol_metrics.items():
+                            logs[f'train_task{task_id}_{metric_name}_@{tol_key}'] = metric_value
+
+            if 'metrics_by_task' in val_results:
+                for task_id, task_metrics in val_results['metrics_by_task'].items():
+                    for tol_key, tol_metrics in task_metrics.items():
+                        for metric_name, metric_value in tol_metrics.items():
+                            logs[f'val_task{task_id}_{metric_name}_@{tol_key}'] = metric_value
+
+            # Add training vs non-training task group metrics
+            if 'metrics_in_training' in train_results:
+                for tol_key, tol_metrics in train_results['metrics_in_training'].items():
+                    for metric_name, metric_value in tol_metrics.items():
+                        logs[f'train_in_dist_{metric_name}_@{tol_key}'] = metric_value
+
+            if 'metrics_out_training' in train_results:
+                for tol_key, tol_metrics in train_results['metrics_out_training'].items():
+                    for metric_name, metric_value in tol_metrics.items():
+                        logs[f'train_out_dist_{metric_name}_@{tol_key}'] = metric_value
+
+            if 'metrics_in_training' in val_results:
+                for tol_key, tol_metrics in val_results['metrics_in_training'].items():
+                    for metric_name, metric_value in tol_metrics.items():
+                        logs[f'val_in_dist_{metric_name}_@{tol_key}'] = metric_value
+
+            if 'metrics_out_training' in val_results:
+                for tol_key, tol_metrics in val_results['metrics_out_training'].items():
+                    for metric_name, metric_value in tol_metrics.items():
+                        logs[f'val_out_dist_{metric_name}_@{tol_key}'] = metric_value
+
             # Add trajectory data if collected (legacy window-level plots)
             if should_collect_plots:
                 logs['train_trajectory_data'] = train_trajectory_data
@@ -474,7 +508,8 @@ class BoundaryTrainer(Trainer):
         freq_multiplier: int = 1,
         peak_detection_distance: float = 5.0,
         iou_window_size: float = 5.0,
-        metric_tolerances: Optional[List[float]] = None
+        metric_tolerances: Optional[List[float]] = None,
+        train_task_ids: Optional[List[int]] = None
     ):
         super().__init__(
             model=model,
@@ -497,6 +532,7 @@ class BoundaryTrainer(Trainer):
         self.peak_detection_distance = peak_detection_distance  # Minimum seconds between peaks
         self.iou_window_size = iou_window_size  # Window size in seconds for IoU calculation
         self.metric_tolerances = metric_tolerances or [1.0, 2.0, 3.0]  # Tolerances in seconds
+        self.train_task_ids = set(train_task_ids) if train_task_ids else set()  # For cross-task evaluation
 
         if freq_multiplier > 1:
             print(f"Frequency multiplier: {freq_multiplier}x (window frames will be mapped to timeline)")
@@ -779,14 +815,20 @@ class BoundaryTrainer(Trainer):
     ) -> Dict[str, Any]:
         """Compute trajectory-level metrics with peak detection at multiple tolerances.
 
+        Computes metrics separately for:
+        1. Each individual task
+        2. All tasks in training set (overall)
+        3. All tasks NOT in training set (overall)
+
         Args:
             trajectories: Dictionary from _accumulate_trajectory_predictions
 
         Returns:
             Dictionary with metrics at each tolerance and trajectory plots data
         """
-        # First, detect peaks once for all trajectories
+        # First, detect peaks once for all trajectories and group by task
         all_trajectory_data = []
+        trajectories_by_task = {}  # task_id -> list of trajectory data
 
         for traj_key, traj_data in trajectories.items():
             task_id, episode_id = traj_key
@@ -806,107 +848,141 @@ class BoundaryTrainer(Trainer):
             # Get peak scores for visualization
             peak_scores = timeline_scores[predicted_peaks] if len(predicted_peaks) > 0 else np.array([])
 
-            all_trajectory_data.append({
+            traj_info = {
                 'task_id': task_id,
                 'episode_id': episode_id,
                 'timeline_scores': timeline_scores,
                 'ground_truth_transitions': ground_truth_transitions,
                 'predicted_peaks': predicted_peaks,
                 'peak_scores': peak_scores
-            })
+            }
 
-        # Compute metrics at each tolerance level
+            all_trajectory_data.append(traj_info)
+
+            # Group by task
+            if task_id not in trajectories_by_task:
+                trajectories_by_task[task_id] = []
+            trajectories_by_task[task_id].append(traj_info)
+
+        # Compute metrics at each tolerance level - overall
         metrics_by_tolerance = {}
+
+        # Compute metrics per task and per task group
+        metrics_by_task = {}  # task_id -> {tolerance -> metrics}
+        metrics_in_training = {}  # tolerance -> metrics for training tasks
+        metrics_out_training = {}  # tolerance -> metrics for non-training tasks
 
         for tolerance in self.metric_tolerances:
             # Convert tolerance from seconds to frames
             tolerance_frames = max(1, int(tolerance * self.freq_multiplier))
+            tol_key = f'{tolerance}s'
 
-            all_tp = 0
-            all_fp = 0
-            all_fn = 0
-            all_ious = []
-            all_peak_distances = []
+            # Helper function to compute metrics for a list of trajectories
+            def compute_metrics_for_trajectories(traj_list):
+                all_tp = 0
+                all_fp = 0
+                all_fn = 0
+                all_ious = []
+                all_peak_distances = []
 
-            for traj_data in all_trajectory_data:
-                timeline_scores = traj_data['timeline_scores']
-                ground_truth_transitions = traj_data['ground_truth_transitions']
-                predicted_peaks = traj_data['predicted_peaks']
+                for traj_data in traj_list:
+                    timeline_scores = traj_data['timeline_scores']
+                    ground_truth_transitions = traj_data['ground_truth_transitions']
+                    predicted_peaks = traj_data['predicted_peaks']
 
-                # Match predictions to ground truth with tolerance
-                matched_gt = set()
-                matched_pred = set()
-                ious = []
-                distances = []
+                    # Match predictions to ground truth with tolerance
+                    matched_gt = set()
+                    matched_pred = set()
+                    ious = []
+                    distances = []
 
-                # For each ground truth transition, find predictions within tolerance
-                for gt_idx in ground_truth_transitions:
-                    best_distance = float('inf')
-                    best_pred_idx = None
-                    best_iou = 0.0
+                    # For each ground truth transition, find predictions within tolerance
+                    for gt_idx in ground_truth_transitions:
+                        best_distance = float('inf')
+                        best_pred_idx = None
+                        best_iou = 0.0
 
-                    for i, pred_idx in enumerate(predicted_peaks):
-                        if i in matched_pred:
-                            continue  # Already matched
+                        for i, pred_idx in enumerate(predicted_peaks):
+                            if i in matched_pred:
+                                continue  # Already matched
 
-                        distance = abs(pred_idx - gt_idx)
+                            distance = abs(pred_idx - gt_idx)
 
-                        # Check if within tolerance
-                        if distance <= tolerance_frames:
-                            # Compute IoU using a window around each transition
-                            iou_window_frames = max(1, int(self.iou_window_size * self.freq_multiplier))
-                            gt_window = set(range(max(0, gt_idx - iou_window_frames),
-                                                 min(len(timeline_scores), gt_idx + iou_window_frames + 1)))
-                            pred_window = set(range(max(0, pred_idx - iou_window_frames),
-                                                   min(len(timeline_scores), pred_idx + iou_window_frames + 1)))
+                            # Check if within tolerance
+                            if distance <= tolerance_frames:
+                                # Compute IoU using a window around each transition
+                                iou_window_frames = max(1, int(self.iou_window_size * self.freq_multiplier))
+                                gt_window = set(range(max(0, gt_idx - iou_window_frames),
+                                                     min(len(timeline_scores), gt_idx + iou_window_frames + 1)))
+                                pred_window = set(range(max(0, pred_idx - iou_window_frames),
+                                                       min(len(timeline_scores), pred_idx + iou_window_frames + 1)))
 
-                            intersection = len(gt_window & pred_window)
-                            union = len(gt_window | pred_window)
-                            iou = intersection / union if union > 0 else 0.0
+                                intersection = len(gt_window & pred_window)
+                                union = len(gt_window | pred_window)
+                                iou = intersection / union if union > 0 else 0.0
 
-                            if distance < best_distance:
-                                best_distance = distance
-                                best_iou = iou
-                                best_pred_idx = i
+                                if distance < best_distance:
+                                    best_distance = distance
+                                    best_iou = iou
+                                    best_pred_idx = i
 
-                    if best_pred_idx is not None:
-                        matched_gt.add(gt_idx)
-                        matched_pred.add(best_pred_idx)
-                        ious.append(best_iou)
-                        distances.append(best_distance)
+                        if best_pred_idx is not None:
+                            matched_gt.add(gt_idx)
+                            matched_pred.add(best_pred_idx)
+                            ious.append(best_iou)
+                            distances.append(best_distance)
 
-                # Compute TP, FP, FN for this trajectory
-                tp = len(matched_gt)
-                fp = len(predicted_peaks) - len(matched_pred)
-                fn = len(ground_truth_transitions) - len(matched_gt)
+                    # Compute TP, FP, FN for this trajectory
+                    tp = len(matched_gt)
+                    fp = len(predicted_peaks) - len(matched_pred)
+                    fn = len(ground_truth_transitions) - len(matched_gt)
 
-                all_tp += tp
-                all_fp += fp
-                all_fn += fn
-                all_ious.extend(ious)
-                all_peak_distances.extend(distances)
+                    all_tp += tp
+                    all_fp += fp
+                    all_fn += fn
+                    all_ious.extend(ious)
+                    all_peak_distances.extend(distances)
 
-            # Calculate metrics for this tolerance
-            precision = all_tp / (all_tp + all_fp) if (all_tp + all_fp) > 0 else 0.0
-            recall = all_tp / (all_tp + all_fn) if (all_tp + all_fn) > 0 else 0.0
-            f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
-            avg_iou = np.mean(all_ious) if len(all_ious) > 0 else 0.0
-            avg_distance = np.mean(all_peak_distances) if len(all_peak_distances) > 0 else 0.0
+                # Calculate metrics
+                precision = all_tp / (all_tp + all_fp) if (all_tp + all_fp) > 0 else 0.0
+                recall = all_tp / (all_tp + all_fn) if (all_tp + all_fn) > 0 else 0.0
+                f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+                avg_iou = np.mean(all_ious) if len(all_ious) > 0 else 0.0
+                avg_distance = np.mean(all_peak_distances) if len(all_peak_distances) > 0 else 0.0
 
-            # Convert average distance from frames back to seconds
-            avg_distance_seconds = avg_distance / self.freq_multiplier if self.freq_multiplier > 0 else 0.0
+                # Convert average distance from frames back to seconds
+                avg_distance_seconds = avg_distance / self.freq_multiplier if self.freq_multiplier > 0 else 0.0
 
-            metrics_by_tolerance[f'{tolerance}s'] = {
-                'accuracy': float(precision),  # Using precision as accuracy proxy
-                'precision': float(precision),
-                'recall': float(recall),
-                'f1_score': float(f1),
-                'avg_iou': float(avg_iou),
-                'avg_peak_distance': float(avg_distance_seconds),  # In seconds
-                'num_tp': int(all_tp),
-                'num_fp': int(all_fp),
-                'num_fn': int(all_fn)
-            }
+                return {
+                    'accuracy': float(precision),  # Using precision as accuracy proxy
+                    'precision': float(precision),
+                    'recall': float(recall),
+                    'f1_score': float(f1),
+                    'avg_iou': float(avg_iou),
+                    'avg_peak_distance': float(avg_distance_seconds),  # In seconds
+                    'num_tp': int(all_tp),
+                    'num_fp': int(all_fp),
+                    'num_fn': int(all_fn)
+                }
+
+            # Overall metrics (all trajectories)
+            metrics_by_tolerance[tol_key] = compute_metrics_for_trajectories(all_trajectory_data)
+
+            # Per-task metrics
+            for task_id, task_trajs in trajectories_by_task.items():
+                if task_id not in metrics_by_task:
+                    metrics_by_task[task_id] = {}
+                metrics_by_task[task_id][tol_key] = compute_metrics_for_trajectories(task_trajs)
+
+            # Training vs non-training task groups
+            if self.train_task_ids:
+                in_training_trajs = [t for t in all_trajectory_data if t['task_id'] in self.train_task_ids]
+                out_training_trajs = [t for t in all_trajectory_data if t['task_id'] not in self.train_task_ids]
+
+                if in_training_trajs:
+                    metrics_in_training[tol_key] = compute_metrics_for_trajectories(in_training_trajs)
+                if out_training_trajs:
+                    metrics_out_training[tol_key] = compute_metrics_for_trajectories(out_training_trajs)
 
         # Build trajectory plots with the first tolerance for visualization
         first_tolerance = self.metric_tolerances[0]
@@ -939,7 +1015,7 @@ class BoundaryTrainer(Trainer):
             })
 
         # Return metrics for the first tolerance as the main metrics (for backward compatibility)
-        # Plus all metrics by tolerance
+        # Plus all metrics by tolerance and task-specific metrics
         first_tol_key = f'{self.metric_tolerances[0]}s'
         main_metrics = metrics_by_tolerance[first_tol_key]
 
@@ -951,6 +1027,9 @@ class BoundaryTrainer(Trainer):
             'avg_iou': main_metrics['avg_iou'],
             'avg_peak_distance': main_metrics['avg_peak_distance'],
             'metrics_by_tolerance': metrics_by_tolerance,
+            'metrics_by_task': metrics_by_task,  # Per-task metrics
+            'metrics_in_training': metrics_in_training,  # Training tasks overall
+            'metrics_out_training': metrics_out_training,  # Non-training tasks overall
             'trajectory_plots': trajectory_plots
         }
 

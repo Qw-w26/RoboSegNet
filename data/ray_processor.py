@@ -396,10 +396,11 @@ class RayDatasetBuilder:
         if self.num_workers is None:
             # Each worker needs num_gpus_per_worker GPUs (from @ray.remote decorator)
             max_gpu_workers = int(num_gpus / self.num_gpus_per_worker)
-            # Also respect CPU limits (each worker needs 1 CPU)
-            max_cpu_workers = num_cpus
+            # Also respect CPU limits (extract num_cpus from decorator)
+            num_cpus_per_worker = self.processor_config.get('num_cpus_per_worker', 0.1)  # Default matches decorator
+            max_cpu_workers = int(num_cpus / num_cpus_per_worker)
             self.num_workers = min(max_gpu_workers, max_cpu_workers)
-            print(f"Auto-detected {self.num_workers} workers (limited by {num_gpus} GPUs, each worker uses {self.num_gpus_per_worker} GPU)")
+            print(f"Auto-detected {self.num_workers} workers (GPUs: {num_gpus}, max_gpu_workers={max_gpu_workers}, max_cpu_workers={max_cpu_workers})")
 
         # Initialize Ray if not already initialized
         if not ray.is_initialized():

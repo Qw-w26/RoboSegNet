@@ -1101,11 +1101,12 @@ def process_task_with_builder(
     val_indices: List[int],
     test_indices: List[int],
     trajectory_offset: int,
-    shared_builder,  # Shared RayDatasetBuilder to avoid nested Ray
+    output_dir: Path,
+    args: argparse.Namespace,
     download: bool,
     cleanup: bool
 ) -> Tuple[int, List, List, List]:
-    """Process a single task using shared dataset builder (NO nested Ray).
+    """Process a single task with task-specific output directory.
 
     Args:
         task_id: Task ID to process
@@ -1115,7 +1116,8 @@ def process_task_with_builder(
         val_indices: Global validation indices
         test_indices: Global test indices
         trajectory_offset: Offset to map global indices to task-specific indices
-        shared_builder: Shared DatasetBuilder instance (avoids nested Ray initialization)
+        output_dir: Base output directory (task-specific subdirectory will be created)
+        args: Command line arguments
         download: Whether to download the task
         cleanup: Whether to cleanup downloaded data after processing
 
@@ -1154,23 +1156,38 @@ def process_task_with_builder(
 
     print(f"[Task {task_id}] Split counts: Train={len(task_train_indices)}, Val={len(task_val_indices)}, Test={len(task_test_indices)}")
 
-    # Build processed datasets for this task using SHARED builder
+    # Build processed datasets for this task using task-specific output directory
     train_processed = []
     val_processed = []
     test_processed = []
 
-    if shared_builder and (task_train_indices or task_val_indices or task_test_indices):
+    if task_train_indices or task_val_indices or task_test_indices:
+        from data.dataset_builder import DatasetBuilder
+
+        # Create task-specific output directory
+        task_output_dir = output_dir / f'task_{task_id}_processed'
+
+        # Create task-specific builder
+        task_builder = DatasetBuilder(
+            output_dir=task_output_dir,
+            extract_dino=args.extract_dino,
+            extract_frames=args.extract_frames,
+            dino_model=args.dino_model,
+            target_fps=args.target_fps,
+            num_workers=args.num_workers
+        )
+
         if task_train_indices:
             print(f"[Task {task_id}] Processing train split...")
-            train_processed = shared_builder.build_dataset(trajectories, 'train', task_train_indices)
+            train_processed = task_builder.build_dataset(trajectories, 'train', task_train_indices)
 
         if task_val_indices:
             print(f"[Task {task_id}] Processing validation split...")
-            val_processed = shared_builder.build_dataset(trajectories, 'val', task_val_indices)
+            val_processed = task_builder.build_dataset(trajectories, 'val', task_val_indices)
 
         if task_test_indices:
             print(f"[Task {task_id}] Processing test split...")
-            test_processed = shared_builder.build_dataset(trajectories, 'test', task_test_indices)
+            test_processed = task_builder.build_dataset(trajectories, 'test', task_test_indices)
 
     # Cleanup downloaded data if requested
     if cleanup:
@@ -1320,33 +1337,12 @@ def main():
     print(f"  Val: {len(val_indices)} trajectories")
     print(f"  Test: {len(test_indices)} trajectories")
 
-    # Step 3: Process tasks sequentially with SHARED builder (avoids nested Ray)
+    # Step 3: Process tasks sequentially with task-specific directories
     if args.build_dataset:
         print(f"\n{'='*80}")
-        print("Step 3: Processing tasks sequentially with shared Ray builder...")
+        print("Step 3: Processing tasks sequentially with task-specific output directories...")
         print(f"{'='*80}")
-        print("NOTE: Task-level parallelism removed to avoid nested Ray initialization.")
-        print("      GPU parallelism happens at trajectory-level (using all 8 GPUs efficiently)")
-
-        # Create ONE shared DatasetBuilder for all tasks
-        # This avoids nested Ray initialization and allows all GPUs to be used
-        from data.dataset_builder import DatasetBuilder
-        shared_builder = DatasetBuilder(
-            output_dir=output_dir / 'processed_dataset',
-            extract_dino=args.extract_dino,
-            extract_frames=args.extract_frames,
-            dino_model=args.dino_model,
-            target_fps=args.target_fps,
-            num_workers=args.num_workers  # Will auto-detect and use all 8 GPUs
-        )
-
-        print(f"Shared builder initialized with {shared_builder.ray_processor.num_workers} workers")
-        print(f"This will utilize ALL available GPUs efficiently\n")
-
-        # Accumulate processed datasets
-        all_train_processed = []
-        all_val_processed = []
-        all_test_processed = []
+        print("NOTE: Each task will be saved to its own directory (e.g., task_327_processed, task_352_processed)")
 
         # Track trajectory offset for index mapping
         trajectory_offset = 0
@@ -1364,13 +1360,13 @@ def main():
         else:
             print(f"Processing {len(tasks_to_process)} tasks sequentially...")
 
-            # Process tasks sequentially (but trajectories in parallel via shared_builder)
+            # Process tasks sequentially with task-specific output directories
             for idx, task_id in enumerate(tasks_to_process):
                 print(f"\n{'='*60}")
                 print(f"Processing task {idx+1}/{len(tasks_to_process)}: Task {task_id}")
                 print(f"{'='*60}")
 
-                # Process task with shared builder
+                # Process task with task-specific output directory
                 task_id, train_proc, val_proc, test_proc = process_task_with_builder(
                     task_id=task_id,
                     data_dir=data_dir,
@@ -1379,46 +1375,20 @@ def main():
                     val_indices=val_indices,
                     test_indices=test_indices,
                     trajectory_offset=task_offsets[task_id],
-                    shared_builder=shared_builder,
+                    output_dir=output_dir,
+                    args=args,
                     download=args.download,
                     cleanup=not args.no_cleanup
                 )
 
-                # Aggregate results
-                all_train_processed.extend(train_proc)
-                all_val_processed.extend(val_proc)
-                all_test_processed.extend(test_proc)
-
                 print(f"✓ Task {task_id} completed: Train={len(train_proc)}, Val={len(val_proc)}, Test={len(test_proc)}")
-                print(f"Cumulative progress: Train={len(all_train_processed)}, "
-                      f"Val={len(all_val_processed)}, Test={len(all_test_processed)}")
-
-        # Step 4: Merge all processed datasets into final splits
-        print(f"\n{'='*80}")
-        print("Step 4: Merging processed datasets...")
-        print(f"{'='*80}")
-
-        # Save merged splits using the shared builder
-        if all_train_processed:
-            print("\nSaving merged train split...")
-            shared_builder._save_split(all_train_processed, 'train')
-
-        if all_val_processed:
-            print("\nSaving merged validation split...")
-            shared_builder._save_split(all_val_processed, 'val')
-
-        if all_test_processed:
-            print("\nSaving merged test split...")
-            shared_builder._save_split(all_test_processed, 'test')
 
         print(f"\n{'='*80}")
         print("DATASET BUILD COMPLETE")
         print(f"{'='*80}")
-        print(f"\nFinal statistics:")
-        print(f"  Train: {len(all_train_processed)} trajectories")
-        print(f"  Val: {len(all_val_processed)} trajectories")
-        print(f"  Test: {len(all_test_processed)} trajectories")
-        print(f"\nProcessed datasets saved to: {output_dir / 'processed_dataset'}")
+        print(f"\nProcessed datasets saved to task-specific directories:")
+        for task_id in tasks_to_process:
+            print(f"  {output_dir / f'task_{task_id}_processed'}")
 
     print("\n✓ Data preparation complete!")
 
