@@ -49,6 +49,7 @@ from models import create_model
 from models.losses import get_loss_function
 from training import (
     BoundaryDataset,
+    LazyBoundaryDataset,
     TrainingDatasetConfig,
     collate_dict,
     BoundaryTrainer,
@@ -145,8 +146,9 @@ def train_boundary_model(config_dict: Dict[str, Any],
         num_dino_frames=base_config.data.num_dino_frames
     )
 
-    train_dataset = BoundaryDataset(train_trajectories, dataset_config)
-    val_dataset = BoundaryDataset(val_trajectories, dataset_config)
+    # Use LazyBoundaryDataset for faster initialization (lazy loading)
+    train_dataset = LazyBoundaryDataset(train_trajectories, dataset_config)
+    val_dataset = LazyBoundaryDataset(val_trajectories, dataset_config)
 
     # Create data loaders
     train_loader = DataLoader(
@@ -155,7 +157,9 @@ def train_boundary_model(config_dict: Dict[str, Any],
         shuffle=True,
         num_workers=base_config.data.num_workers,
         collate_fn=collate_dict,
-        pin_memory=base_config.data.pin_memory
+        pin_memory=base_config.data.pin_memory,
+        persistent_workers=True if base_config.data.num_workers > 0 else False,  # Keep workers alive
+        prefetch_factor=2  # Prefetch 2 batches per worker
     )
 
     val_loader = DataLoader(
@@ -164,7 +168,9 @@ def train_boundary_model(config_dict: Dict[str, Any],
         shuffle=False,
         num_workers=base_config.data.num_workers,
         collate_fn=collate_dict,
-        pin_memory=base_config.data.pin_memory
+        pin_memory=base_config.data.pin_memory,
+        persistent_workers=True if base_config.data.num_workers > 0 else False,
+        prefetch_factor=2
     )
 
     # Create model
