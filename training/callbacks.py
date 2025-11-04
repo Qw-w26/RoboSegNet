@@ -1089,9 +1089,12 @@ class CheckpointCallback(Callback):
         filename: str
     ) -> None:
         """Save a checkpoint file."""
+        # Get unwrapped model (handles DDP)
+        model_to_save = trainer.get_model() if hasattr(trainer, 'get_model') else trainer.model
+
         checkpoint = {
             'epoch': epoch,
-            'model_state_dict': trainer.model.state_dict(),
+            'model_state_dict': model_to_save.state_dict(),
             'optimizer_state_dict': trainer.optimizer.state_dict(),
             'best_metric': self.best_metric,
             'logs': logs

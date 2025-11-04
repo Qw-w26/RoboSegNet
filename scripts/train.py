@@ -37,14 +37,18 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import torch
 import torch.optim as optim
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 
 from config import load_config, validate_config, parse_cli_overrides
 from models import create_model
 from models.losses import get_loss_function
 from training import (
     BoundaryDataset,
+    LazyBoundaryDataset,
     TrainingDatasetConfig,
     collate_dict,
     BoundaryTrainer,
@@ -56,6 +60,46 @@ from training import (
 )
 from data import load_parquet_split
 from utils.reproducibility import set_all_seeds
+
+
+def setup_distributed():
+    """Initialize distributed training.
+
+    Returns:
+        Tuple of (local_rank, global_rank, world_size, is_distributed)
+    """
+    # Check if running in distributed mode
+    if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
+        # Distributed training via torchrun
+        rank = int(os.environ['RANK'])
+        local_rank = int(os.environ['LOCAL_RANK'])
+        world_size = int(os.environ['WORLD_SIZE'])
+
+        # Set master port if not already set (fallback)
+        if 'MASTER_PORT' not in os.environ:
+            os.environ['MASTER_PORT'] = '29500'  # Change this default if needed
+
+        # Initialize process group
+        dist.init_process_group(backend='nccl')
+
+        # Set device
+        torch.cuda.set_device(local_rank)
+
+        return local_rank, rank, world_size, True
+    else:
+        # Single GPU or CPU training
+        return 0, 0, 1, False
+
+
+def cleanup_distributed():
+    """Clean up distributed training."""
+    if dist.is_initialized():
+        dist.destroy_process_group()
+
+
+def is_main_process(rank: int) -> bool:
+    """Check if this is the main process (rank 0)."""
+    return rank == 0
 
 
 def parse_args() -> argparse.Namespace:
@@ -89,44 +133,62 @@ def parse_args() -> argparse.Namespace:
 
 def main():
     """Main training function."""
+    # Setup distributed training
+    local_rank, rank, world_size, is_distributed = setup_distributed()
+
     args = parse_args()
 
     # Parse CLI overrides
     overrides = parse_cli_overrides(args.overrides) if args.overrides else None
 
     # Load configuration
-    print("="*80)
-    print("Loading configuration...")
-    print("="*80)
+    if is_main_process(rank):
+        print("="*80)
+        print("Loading configuration...")
+        print("="*80)
     config = load_config(args.config, overrides=overrides)
     validate_config(config)
 
-    print(f"Experiment: {config.experiment_name}")
-    print(f"Config file: {args.config}")
-    if overrides:
-        print(f"Overrides: {overrides}")
+    if is_main_process(rank):
+        print(f"Experiment: {config.experiment_name}")
+        print(f"Config file: {args.config}")
+        if overrides:
+            print(f"Overrides: {overrides}")
 
-    # Set random seed
-    set_all_seeds(config.training.seed)
-    print(f"Random seed: {config.training.seed}")
+    # Set random seed (different for each rank for data augmentation diversity)
+    seed = config.training.seed + rank
+    set_all_seeds(seed)
+    if is_main_process(rank):
+        print(f"Random seed: {config.training.seed} (base) + {rank} (rank) = {seed}")
 
-    # Setup device
-    if config.training.device == 'auto':
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    # Setup device for DDP
+    if is_distributed:
+        device = torch.device(f'cuda:{local_rank}')
     else:
-        device = torch.device(config.training.device)
-    print(f"Device: {device}")
+        if config.training.device == 'auto':
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        else:
+            device = torch.device(config.training.device)
+
+    if is_main_process(rank):
+        if is_distributed:
+            print(f"Distributed training: {world_size} GPUs")
+            print(f"Device: {device} (rank {rank}/{world_size})")
+        else:
+            print(f"Device: {device}")
 
     # Load data
-    print("\n" + "="*80)
-    print("Loading data...")
-    print("="*80)
+    if is_main_process(rank):
+        print("\n" + "="*80)
+        print("Loading data...")
+        print("="*80)
 
     from data import load_multi_task_split
 
-    print(f"Meta directory: {config.data.meta_dir}")
-    print(f"Training tasks: {config.data.train_task_ids}")
-    print(f"Evaluation tasks: {config.data.eval_task_ids}")
+    if is_main_process(rank):
+        print(f"Meta directory: {config.data.meta_dir}")
+        print(f"Training tasks: {config.data.train_task_ids}")
+        print(f"Evaluation tasks: {config.data.eval_task_ids}")
 
     train_trajectories = load_multi_task_split(
         'train',
@@ -155,46 +217,91 @@ def main():
         num_dino_frames=config.data.num_dino_frames  # Pass num_dino_frames from config
     )
 
-    print("\nCreating training dataset...")
-    train_dataset = BoundaryDataset(train_trajectories, dataset_config)
+    if is_main_process(rank):
+        print("\nCreating training dataset (lazy loading)...")
+    # Use LazyBoundaryDataset for faster initialization
+    train_dataset = LazyBoundaryDataset(train_trajectories, dataset_config)
 
-    print("\nCreating validation dataset...")
-    val_dataset = BoundaryDataset(val_trajectories, dataset_config)
+    if is_main_process(rank):
+        print("\nCreating validation dataset (lazy loading)...")
+    val_dataset = LazyBoundaryDataset(val_trajectories, dataset_config)
 
-    print(f"\nDataset statistics:")
-    print(f"  Training samples: {len(train_dataset)}")
-    print(f"  Validation samples: {len(val_dataset)}")
+    if is_main_process(rank):
+        print(f"\nDataset statistics:")
+        print(f"  Training samples: {len(train_dataset)}")
+        print(f"  Validation samples: {len(val_dataset)}")
 
-    # Create data loaders
-    print("\nCreating data loaders...")
+    # Create data loaders with DistributedSampler
+    if is_main_process(rank):
+        print("\nCreating data loaders...")
+
+    # Use DistributedSampler for multi-GPU training
+    train_sampler = DistributedSampler(
+        train_dataset,
+        num_replicas=world_size,
+        rank=rank,
+        shuffle=True
+    ) if is_distributed else None
+
+    val_sampler = DistributedSampler(
+        val_dataset,
+        num_replicas=world_size,
+        rank=rank,
+        shuffle=False
+    ) if is_distributed else None
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=config.data.batch_size,
-        shuffle=True,
+        sampler=train_sampler,
+        shuffle=(train_sampler is None),  # Only shuffle if not using sampler
         num_workers=config.data.num_workers,
         collate_fn=collate_dict,
-        pin_memory=config.data.pin_memory
+        pin_memory=config.data.pin_memory,
+        persistent_workers=True if config.data.num_workers > 0 else False,  # Keep workers alive
+        prefetch_factor=2  # Prefetch 2 batches per worker
     )
 
     val_loader = DataLoader(
         val_dataset,
         batch_size=config.data.batch_size,
+        sampler=val_sampler,
         shuffle=False,
         num_workers=config.data.num_workers,
         collate_fn=collate_dict,
-        pin_memory=config.data.pin_memory
+        pin_memory=config.data.pin_memory,
+        persistent_workers=True if config.data.num_workers > 0 else False,
+        prefetch_factor=2
     )
 
-    print(f"  Train batches: {len(train_loader)}")
-    print(f"  Val batches: {len(val_loader)}")
+    if is_main_process(rank):
+        print(f"  Train batches per GPU: {len(train_loader)}")
+        print(f"  Val batches per GPU: {len(val_loader)}")
+        if is_distributed:
+            print(f"  Total train batches: {len(train_loader) * world_size}")
+            print(f"  Total val batches: {len(val_loader) * world_size}")
 
     # Create model
-    print("\n" + "="*80)
-    print("Creating model...")
-    print("="*80)
+    if is_main_process(rank):
+        print("\n" + "="*80)
+        print("Creating model...")
+        print("="*80)
 
     model = create_model(config.model, device=device)
-    print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
+
+    if is_main_process(rank):
+        print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
+
+    # Wrap model with DDP for distributed training
+    if is_distributed:
+        model = DDP(
+            model,
+            device_ids=[local_rank],
+            output_device=local_rank,
+            find_unused_parameters=False  # Enable to handle unused parameters and inplace ops
+        )
+        if is_main_process(rank):
+            print(f"Model wrapped with DistributedDataParallel (find_unused_parameters=True)")
 
     # Create optimizer
     optimizer = optim.Adam(
@@ -239,86 +346,86 @@ def main():
             **loss_kwargs
         )
 
-    print(f"Optimizer: Adam (lr={config.training.learning_rate}, wd={config.training.weight_decay})")
-    print(f"Scheduler: {config.training.scheduler}")
-    print(f"Loss: {config.training.loss_type}")
+    if is_main_process(rank):
+        print(f"Optimizer: Adam (lr={config.training.learning_rate}, wd={config.training.weight_decay})")
+        print(f"Scheduler: {config.training.scheduler}")
+        print(f"Loss: {config.training.loss_type}")
 
     # Resume from checkpoint if specified
     start_epoch = 0
     if args.resume:
-        print(f"\nLoading checkpoint from {args.resume}")
-        checkpoint = torch.load(args.resume)
-        model.load_state_dict(checkpoint['model_state_dict'])
+        if is_main_process(rank):
+            print(f"\nLoading checkpoint from {args.resume}")
+        # Load checkpoint on all ranks
+        checkpoint = torch.load(args.resume, map_location=device)
+
+        # Load model state (handle DDP wrapper)
+        if is_distributed:
+            model.module.load_state_dict(checkpoint['model_state_dict'])
+        else:
+            model.load_state_dict(checkpoint['model_state_dict'])
+
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         if scheduler and 'scheduler_state_dict' in checkpoint:
             scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
         start_epoch = checkpoint.get('epoch', 0)
-        print(f"Resumed from epoch {start_epoch}")
 
-    # Create callbacks
-    print("\n" + "="*80)
-    print("Configuring callbacks...")
-    print("="*80)
+        if is_main_process(rank):
+            print(f"Resumed from epoch {start_epoch}")
 
+    # Create callbacks (only on main process to avoid duplicate logging)
+    if is_main_process(rank):
+        print("\n" + "="*80)
+        print("Configuring callbacks...")
+        print("="*80)
+
+    # Create callbacks only on main process to avoid duplicate logging
     callbacks = []
 
-    # WandB callback
-    if config.wandb.enabled:
-        wandb_callback = WandBCallback(
-            project=config.wandb.project,
-            name=config.wandb.name or config.experiment_name,
-            config=config.to_dict(),
-            log_plots_every=config.training.log_plots_every,
-            num_plots=config.training.num_plots,
-            offline=(config.wandb.mode == 'offline')
-        )
-        callbacks.append(wandb_callback)
-        print("✓ WandB logging enabled")
+    if is_main_process(rank):
+        # WandB callback
+        if config.wandb.enabled:
+            wandb_callback = WandBCallback(
+                project=config.wandb.project,
+                name=config.wandb.name or config.experiment_name,
+                config=config.to_dict(),
+                log_plots_every=config.training.log_plots_every,
+                num_plots=config.training.num_plots,
+                offline=(config.wandb.mode == 'offline')
+            )
+            callbacks.append(wandb_callback)
+            print("✓ WandB logging enabled")
 
-    # Checkpoint callback
-    checkpoint_callback = CheckpointCallback(
-        save_dir=config.training.checkpoint_dir,
-        monitor='val_loss',
-        mode='min',
-        save_every=config.training.save_every
-    )
-    callbacks.append(checkpoint_callback)
-    print(f"✓ Checkpointing enabled (save_dir={config.training.checkpoint_dir})")
-
-    # Early stopping callback
-    if config.training.early_stopping:
-        early_stopping_callback = EarlyStoppingCallback(
+        # Checkpoint callback
+        checkpoint_callback = CheckpointCallback(
+            save_dir=config.training.checkpoint_dir,
             monitor='val_loss',
-            patience=config.training.patience,
-            mode='min'
+            mode='min',
+            save_every=config.training.save_every
         )
-        callbacks.append(early_stopping_callback)
-        print(f"✓ Early stopping enabled (patience={config.training.patience})")
+        callbacks.append(checkpoint_callback)
+        print(f"✓ Checkpointing enabled (save_dir={config.training.checkpoint_dir})")
 
-    # Scheduler callback
-    if scheduler:
-        scheduler_callback = LearningRateSchedulerCallback(scheduler)
-        callbacks.append(scheduler_callback)
+        # Early stopping callback
+        if config.training.early_stopping:
+            early_stopping_callback = EarlyStoppingCallback(
+                monitor='val_loss',
+                patience=config.training.patience,
+                mode='min'
+            )
+            callbacks.append(early_stopping_callback)
+            print(f"✓ Early stopping enabled (patience={config.training.patience})")
 
-    # Embedding visualization callback (only if WandB is enabled)
-    if config.wandb.enabled:
-        embedding_vis_callback = EmbeddingVisualizationCallback(
-            method='pca',  # Fast PCA visualization
-            num_trajectories=3,  # Visualize 3 trajectories per split
-            max_windows_per_traj=None,  # Include all windows
-            layer='proprio_encoded',  # Visualize proprioceptive encoder output (after transformer)
-            color_by='action',  # Color by action labels instead of timestep
-            log_on_save=True,  # Log when best model is saved
-            log_on_first=True,  # Log on first epoch
-            log_on_last=True  # Log at end of training
-        )
-        callbacks.append(embedding_vis_callback)
-        print("✓ Trajectory embedding visualization enabled (layer=proprio_encoded, color=action)")
+        # Scheduler callback
+        if scheduler:
+            scheduler_callback = LearningRateSchedulerCallback(scheduler)
+            callbacks.append(scheduler_callback)
 
     # Create trainer
-    print("\n" + "="*80)
-    print("Initializing trainer...")
-    print("="*80)
+    if is_main_process(rank):
+        print("\n" + "="*80)
+        print("Initializing trainer...")
+        print("="*80)
 
     # Determine loss output type
     distribution_losses = ['dist_ce', 'kl_div', 'js_div', 'focal_dist_ce']
@@ -347,29 +454,36 @@ def main():
     )
 
     # Train
-    print("\n" + "="*80)
-    print("Starting training...")
-    print("="*80)
+    if is_main_process(rank):
+        print("\n" + "="*80)
+        print("Starting training...")
+        print("="*80)
 
-    history = trainer.fit(
-        train_loader=train_loader,
-        val_loader=val_loader,
-        num_epochs=config.training.num_epochs,
-        log_every=config.training.log_every,
-        collect_plots_every=config.training.log_plots_every
-    )
+    try:
+        history = trainer.fit(
+            train_loader=train_loader,
+            val_loader=val_loader,
+            num_epochs=config.training.num_epochs,
+            log_every=config.training.log_every,
+            collect_plots_every=config.training.log_plots_every
+        )
 
-    print("\n" + "="*80)
-    print("Training complete!")
-    print("="*80)
+        if is_main_process(rank):
+            print("\n" + "="*80)
+            print("Training complete!")
+            print("="*80)
 
-    # Print final statistics
-    print(f"\nFinal training loss: {history['train_loss'][-1]:.4f}")
-    if val_loader:
-        print(f"Final validation loss: {history['val_loss'][-1]:.4f}")
+            # Print final statistics
+            print(f"\nFinal training loss: {history['train_loss'][-1]:.4f}")
+            if val_loader:
+                print(f"Final validation loss: {history['val_loss'][-1]:.4f}")
 
-    print(f"\nCheckpoints saved to: {config.training.checkpoint_dir}")
-    print(f"Experiment: {config.experiment_name}")
+            print(f"\nCheckpoints saved to: {config.training.checkpoint_dir}")
+            print(f"Experiment: {config.experiment_name}")
+
+    finally:
+        # Cleanup distributed training
+        cleanup_distributed()
 
 
 if __name__ == '__main__':

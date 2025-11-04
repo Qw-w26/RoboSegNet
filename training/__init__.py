@@ -7,6 +7,7 @@ from .training_dataset import (
     Window,
     collate_dict
 )
+from .lazy_dataset import LazyBoundaryDataset
 from .trainer import Trainer, BoundaryTrainer
 from .callbacks import (
     Callback,
@@ -35,6 +36,7 @@ __all__ = [
     'SegmentBoundaryDataset',
     'create_dataloaders',
     'BoundaryDataset',
+    'LazyBoundaryDataset',  # Faster for large datasets
     'TrainingDatasetConfig',
     'Window',
     'collate_dict',

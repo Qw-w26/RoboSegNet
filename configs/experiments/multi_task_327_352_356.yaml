@@ -11,18 +11,17 @@ model:
   prediction_window_size: 18
   use_proprio: true
   use_dino: true
-  transformer_dropout: 0.3
-  embedding_dropout: 0.1
-  dino_encoder_dropout: 0.4
-  mlp_dropout: 0.4
-  feature_noise_std: 0.05
+  transformer_dropout: 0.33
+  embedding_dropout: 0.24
+  dino_encoder_dropout: 0.15
+  mlp_dropout: 0.24
+  feature_noise_std: 0.03
 
 data:
   # Multi-task configuration
-  meta_dir: ./full_dataset
-  train_task_ids: [327, 352, 356]  # Train on 3 tasks
-  eval_task_ids: null  # Evaluate on same 3 tasks (or specify different tasks)
-
+  meta_dir: /shared/projects/agibot/full_dataset/
+  train_task_ids: [327, 352, 354, 356, 357, 358, 359, 360, 365, 366, 367, 368, 372, 374, 375, 376, 377, 378, 380, 384, 385, 389, 390]
+  eval_task_ids: [327, 352, 354, 356, 357, 358, 359, 360, 365, 366, 367, 368, 372, 374, 375, 376, 377, 378, 380, 384, 385, 389, 390]
   cache_dir: ./cache
 
   # Dataset parameters
@@ -33,7 +32,7 @@ data:
 
   # DataLoader
   batch_size: 2048
-  num_workers: 4
+  num_workers: 16  # Reduced from 64 - too many workers causes overhead
   pin_memory: true
 
   # Feature extraction
@@ -47,9 +46,9 @@ data:
   max_samples: null
 
 training:
-  num_epochs: 1000
-  learning_rate: 0.0001
-  weight_decay: 0.0001
+  num_epochs: 5000
+  learning_rate: 0.0002
+  weight_decay: 0.000001
   optimizer: adam
 
   # Scheduler
@@ -59,14 +58,14 @@ training:
   # Loss
   loss_type: mse
   loss_pos_weight: 10.0
-  loss_alpha: 0.25
-  loss_gamma: 2.0
+  loss_alpha: 0.223
+  loss_gamma: 2.551
 
   # Metrics
-  classification_threshold: 0.45
+  classification_threshold: 0.40
   peak_detection_distance: 2.0
-  iou_window_size: 0.5
-  metric_tolerances: [1.0, 2.0, 3.0]
+  iou_window_size: 2.0
+  metric_tolerances: [1.0, 3.0, 5.0]
 
   # Regularization
   gradient_clip_val: null

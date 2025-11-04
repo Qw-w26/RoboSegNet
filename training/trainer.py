@@ -24,9 +24,11 @@ Example:
 from typing import Any, Dict, List, Optional, Callable, Tuple
 from pathlib import Path
 import warnings
+import os
 
 import torch
 import torch.nn as nn
+import torch.distributed as dist
 from torch.utils.data import DataLoader
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import _LRScheduler
@@ -95,8 +97,26 @@ class Trainer:
         self.stop_training = False
         self.current_epoch = 0
 
-        print(f"Trainer initialized on device: {self.device}")
-        print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
+        # Distributed training state
+        self.is_distributed = dist.is_available() and dist.is_initialized()
+        self.rank = dist.get_rank() if self.is_distributed else 0
+        self.world_size = dist.get_world_size() if self.is_distributed else 1
+
+        if self.is_main_process():
+            print(f"Trainer initialized on device: {self.device}")
+            if self.is_distributed:
+                print(f"Distributed training: {self.world_size} GPUs (rank {self.rank})")
+            print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
+
+    def is_main_process(self) -> bool:
+        """Check if this is the main process (rank 0)."""
+        return self.rank == 0
+
+    def get_model(self) -> nn.Module:
+        """Get the underlying model, unwrapping DDP if necessary."""
+        if isinstance(self.model, nn.parallel.DistributedDataParallel):
+            return self.model.module
+        return self.model
 
     def fit(
         self,
@@ -144,11 +164,16 @@ class Trainer:
 
             self.current_epoch = epoch
 
+            # Set epoch for DistributedSampler if using distributed training
+            if self.is_distributed and hasattr(train_loader.sampler, 'set_epoch'):
+                train_loader.sampler.set_epoch(epoch)
+
             # Callback: on_epoch_begin
             for callback in self.callbacks:
                 callback.on_epoch_begin(self, epoch)
 
-            print(f"\nEpoch {epoch+1}/{num_epochs}")
+            if self.is_main_process():
+                print(f"\nEpoch {epoch+1}/{num_epochs}")
 
             # Determine if we should collect trajectory data this epoch
             should_collect_plots = (epoch + 1) % collect_plots_every == 0
@@ -267,25 +292,26 @@ class Trainer:
             if val_trajectory_plots:
                 logs['val_trajectory_plots'] = val_trajectory_plots
 
-            # Print epoch summary with peak detection metrics
-            print(f"Train Loss: {train_loss:.4f}, P: {train_results.get('precision', 0.0):.3f}, R: {train_results.get('recall', 0.0):.3f}, F1: {train_results.get('f1_score', 0.0):.3f}, IoU: {train_results.get('avg_iou', 0.0):.3f}", end='')
-            if val_loss is not None:
-                print(f" | Val Loss: {val_loss:.4f}, P: {val_results.get('precision', 0.0):.3f}, R: {val_results.get('recall', 0.0):.3f}, F1: {val_f1:.3f}, IoU: {val_results.get('avg_iou', 0.0):.3f}", end='')
-            print(f" | LR: {current_lr:.6f}")
+            # Print epoch summary with peak detection metrics (only on main process)
+            if self.is_main_process():
+                print(f"Train Loss: {train_loss:.4f}, P: {train_results.get('precision', 0.0):.3f}, R: {train_results.get('recall', 0.0):.3f}, F1: {train_results.get('f1_score', 0.0):.3f}, IoU: {train_results.get('avg_iou', 0.0):.3f}", end='')
+                if val_loss is not None:
+                    print(f" | Val Loss: {val_loss:.4f}, P: {val_results.get('precision', 0.0):.3f}, R: {val_results.get('recall', 0.0):.3f}, F1: {val_f1:.3f}, IoU: {val_results.get('avg_iou', 0.0):.3f}", end='')
+                print(f" | LR: {current_lr:.6f}")
 
-            # Print metrics by tolerance for training dataset
-            if 'metrics_by_tolerance' in train_results and train_results['metrics_by_tolerance']:
-                print("  Training metrics by tolerance:")
-                for tol_key in sorted(train_results['metrics_by_tolerance'].keys()):
-                    tol_metrics = train_results['metrics_by_tolerance'][tol_key]
-                    print(f"    @{tol_key}: P={tol_metrics['precision']:.3f}, R={tol_metrics['recall']:.3f}, F1={tol_metrics['f1_score']:.3f}, IoU={tol_metrics['avg_iou']:.3f}, Dist={tol_metrics['avg_peak_distance']:.3f}s")
+                # Print metrics by tolerance for training dataset
+                if 'metrics_by_tolerance' in train_results and train_results['metrics_by_tolerance']:
+                    print("  Training metrics by tolerance:")
+                    for tol_key in sorted(train_results['metrics_by_tolerance'].keys()):
+                        tol_metrics = train_results['metrics_by_tolerance'][tol_key]
+                        print(f"    @{tol_key}: P={tol_metrics['precision']:.3f}, R={tol_metrics['recall']:.3f}, F1={tol_metrics['f1_score']:.3f}, IoU={tol_metrics['avg_iou']:.3f}, Dist={tol_metrics['avg_peak_distance']:.3f}s")
 
-            # Print metrics by tolerance for validation dataset
-            if 'metrics_by_tolerance' in val_results and val_results['metrics_by_tolerance']:
-                print("  Validation metrics by tolerance:")
-                for tol_key in sorted(val_results['metrics_by_tolerance'].keys()):
-                    tol_metrics = val_results['metrics_by_tolerance'][tol_key]
-                    print(f"    @{tol_key}: P={tol_metrics['precision']:.3f}, R={tol_metrics['recall']:.3f}, F1={tol_metrics['f1_score']:.3f}, IoU={tol_metrics['avg_iou']:.3f}, Dist={tol_metrics['avg_peak_distance']:.3f}s")
+                # Print metrics by tolerance for validation dataset
+                if 'metrics_by_tolerance' in val_results and val_results['metrics_by_tolerance']:
+                    print("  Validation metrics by tolerance:")
+                    for tol_key in sorted(val_results['metrics_by_tolerance'].keys()):
+                        tol_metrics = val_results['metrics_by_tolerance'][tol_key]
+                        print(f"    @{tol_key}: P={tol_metrics['precision']:.3f}, R={tol_metrics['recall']:.3f}, F1={tol_metrics['f1_score']:.3f}, IoU={tol_metrics['avg_iou']:.3f}, Dist={tol_metrics['avg_peak_distance']:.3f}s")
 
             # Callback: on_epoch_end
             for callback in self.callbacks:
@@ -293,7 +319,8 @@ class Trainer:
 
             # Check if training should stop (early stopping)
             if self.stop_training:
-                print("\nTraining stopped early")
+                if self.is_main_process():
+                    print("\nTraining stopped early")
                 break
 
         # Callback: on_train_end
@@ -305,7 +332,8 @@ class Trainer:
         for callback in self.callbacks:
             callback.on_train_end(self, final_logs)
 
-        print("\nTraining completed!")
+        if self.is_main_process():
+            print("\nTraining completed!")
         return history
 
     def _train_epoch(
@@ -323,7 +351,8 @@ class Trainer:
         total_loss = 0.0
         trajectory_data = []
 
-        pbar = tqdm(train_loader, desc=f'Epoch {self.current_epoch+1}')
+        # Only show progress bar on main process
+        pbar = tqdm(train_loader, desc=f'Epoch {self.current_epoch+1}', disable=not self.is_main_process())
         for batch_idx, batch in enumerate(pbar):
             # Callback: on_batch_begin
             for callback in self.callbacks:
@@ -387,7 +416,8 @@ class Trainer:
         trajectory_data = []
 
         with torch.no_grad():
-            for batch in tqdm(val_loader, desc='Validation'):
+            # Only show progress bar on main process
+            for batch in tqdm(val_loader, desc='Validation', disable=not self.is_main_process()):
                 # Forward pass only
                 loss, batch_trajectory_data = self._validation_step(
                     batch,
@@ -427,7 +457,8 @@ class Trainer:
         """
         # Default implementation - override in subclass for custom logic
         if hasattr(self, '_process_batch'):
-            return self._process_batch(batch, training=True, collect_trajectory_data=collect_trajectory_data)
+            loss, trajectory_data, logits = self._process_batch(batch, training=True, collect_trajectory_data=collect_trajectory_data)
+            return loss, trajectory_data
         else:
             raise NotImplementedError(
                 "Either override _train_step or set a _process_batch method"
@@ -445,7 +476,8 @@ class Trainer:
         """
         # Default implementation - override in subclass for custom logic
         if hasattr(self, '_process_batch'):
-            return self._process_batch(batch, training=False, collect_trajectory_data=collect_trajectory_data)
+            loss, trajectory_data, logits = self._process_batch(batch, training=False, collect_trajectory_data=collect_trajectory_data)
+            return loss, trajectory_data
         else:
             raise NotImplementedError(
                 "Either override _validation_step or set a _process_batch method"
@@ -455,7 +487,7 @@ class Trainer:
         """Set a custom batch processing function.
 
         The function should have signature:
-            process_fn(batch, training=True, collect_trajectory_data=False) -> (loss, trajectory_data)
+            process_fn(batch, training=True, collect_trajectory_data=False) -> (loss, trajectory_data, logits)
 
         Example:
             >>> def process_batch(batch, training=True, collect_trajectory_data=False):
@@ -563,7 +595,8 @@ class BoundaryTrainer(Trainer):
         # Accumulate batch metadata for trajectory-level metrics
         all_batch_data = []
 
-        pbar = tqdm(train_loader, desc=f'Epoch {self.current_epoch+1}')
+        # Only show progress bar on main process
+        pbar = tqdm(train_loader, desc=f'Epoch {self.current_epoch+1}', disable=not self.is_main_process())
         for batch_idx, batch in enumerate(pbar):
             # Callback: on_batch_begin
             for callback in self.callbacks:
@@ -646,7 +679,8 @@ class BoundaryTrainer(Trainer):
         all_batch_data = []
 
         with torch.no_grad():
-            for batch in tqdm(val_loader, desc='Validation'):
+            # Only show progress bar on main process
+            for batch in tqdm(val_loader, desc='Validation', disable=not self.is_main_process()):
                 # Forward pass only
                 loss, batch_trajectory_data, batch_metadata = self._validation_step_with_metrics(
                     batch,
@@ -1101,18 +1135,12 @@ class BoundaryTrainer(Trainer):
         Returns:
             Tuple of (loss, trajectory_data, batch_metadata)
         """
-        # Process batch normally
-        loss, trajectory_data = self._process_batch(batch, training=True, collect_trajectory_data=collect_trajectory_data)
+        # Process batch normally (returns logits from forward pass)
+        loss, trajectory_data, logits = self._process_batch(batch, training=True, collect_trajectory_data=collect_trajectory_data)
 
         # Extract predictions and metadata for trajectory-level metrics
+        # Reuse logits from the forward pass to avoid double forward pass issues
         with torch.no_grad():
-            tokenized_actions = batch['proprio_features'].to(self.device)
-            # Concatenate DINO frames: list of tensors [(B, 1024), (B, 1024), ...]
-            dino_features = torch.cat(batch['dino_features'], dim=1).to(self.device)
-
-            # Get predictions
-            logits = self.model(tokenized_actions, None, dino_features)
-
             # Apply appropriate activation based on loss type
             if self.use_raw_output:
                 # Raw outputs (for mse_raw): apply ReLU to bound to [0, ∞)
@@ -1148,17 +1176,11 @@ class BoundaryTrainer(Trainer):
         Returns:
             Tuple of (loss, trajectory_data, batch_metadata)
         """
-        # Process batch normally
-        loss, trajectory_data = self._process_batch(batch, training=False, collect_trajectory_data=collect_trajectory_data)
+        # Process batch normally (returns logits from forward pass)
+        loss, trajectory_data, logits = self._process_batch(batch, training=False, collect_trajectory_data=collect_trajectory_data)
 
         # Extract predictions and metadata for trajectory-level metrics
-        tokenized_actions = batch['proprio_features'].to(self.device)
-        # Concatenate DINO frames: list of tensors [(B, 1024), (B, 1024), ...]
-        dino_features = torch.cat(batch['dino_features'], dim=1).to(self.device)
-
-        # Get predictions
-        logits = self.model(tokenized_actions, None, dino_features)
-
+        # Reuse logits from the forward pass to avoid double forward pass issues
         # Apply appropriate activation based on loss type
         if self.use_raw_output:
             # Raw outputs (for mse_raw): apply ReLU to bound to [0, ∞)
@@ -1259,7 +1281,7 @@ class BoundaryTrainer(Trainer):
         - 'task_id', 'episode_id', 'window', 'intervals': Metadata
 
         Returns:
-            Tuple of (loss, trajectory_data)
+            Tuple of (loss, trajectory_data, logits)
         """
         # Move data to device
         tokenized_actions = batch['proprio_features'].to(self.device)
@@ -1331,4 +1353,4 @@ class BoundaryTrainer(Trainer):
                         'intervals': batch['intervals'][i]
                     })
 
-        return loss, trajectory_data
+        return loss, trajectory_data, logits

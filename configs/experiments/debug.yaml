@@ -55,7 +55,7 @@ training:
   use_amp: false
 
   checkpoint_dir: ./checkpoints/debug
-  save_every: 1
+  save_every: 10
   save_best_only: false
 
   early_stopping: false
