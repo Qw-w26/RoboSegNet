@@ -45,7 +45,7 @@ from ray.tune.search.hyperopt import HyperOptSearch
 from ray.tune.search.optuna import OptunaSearch
 
 from config import load_config, validate_config, parse_cli_overrides
-from models import create_model
+from models import create_model, create_detr_criterion
 from models.losses import get_loss_function
 from training import (
     BoundaryDataset,
@@ -54,6 +54,7 @@ from training import (
     collate_dict,
     BoundaryTrainer,
 )
+from training.detr_utils import collate_detr_batch, compute_detr_metrics
 from data import load_multi_task_split
 from utils.reproducibility import set_all_seeds
 
@@ -150,13 +151,17 @@ def train_boundary_model(config_dict: Dict[str, Any],
     train_dataset = LazyBoundaryDataset(train_trajectories, dataset_config)
     val_dataset = LazyBoundaryDataset(val_trajectories, dataset_config)
 
+    # Determine collate function based on architecture
+    is_detr = getattr(base_config.model, 'architecture', 'mlp') == 'boundary_detr'
+    collate_fn = collate_detr_batch if is_detr else collate_dict
+
     # Create data loaders
     train_loader = DataLoader(
         train_dataset,
         batch_size=base_config.data.batch_size,
         shuffle=True,
         num_workers=base_config.data.num_workers,
-        collate_fn=collate_dict,
+        collate_fn=collate_fn,
         pin_memory=base_config.data.pin_memory,
         persistent_workers=True if base_config.data.num_workers > 0 else False,  # Keep workers alive
         prefetch_factor=2  # Prefetch 2 batches per worker
@@ -167,7 +172,7 @@ def train_boundary_model(config_dict: Dict[str, Any],
         batch_size=base_config.data.batch_size,
         shuffle=False,
         num_workers=base_config.data.num_workers,
-        collate_fn=collate_dict,
+        collate_fn=collate_fn,
         pin_memory=base_config.data.pin_memory,
         persistent_workers=True if base_config.data.num_workers > 0 else False,
         prefetch_factor=2
@@ -193,7 +198,20 @@ def train_boundary_model(config_dict: Dict[str, Any],
         )
 
     # Create loss function
-    if base_config.training.loss_type == 'bce':
+    if is_detr:
+        # DETR uses SetCriterion with Hungarian matching
+        # Create combined config object for criterion
+        criterion = create_detr_criterion(
+            type('Config', (), {
+                'num_boundary_queries': base_config.model.num_boundary_queries,
+                'loss_position_weight': base_config.training.loss_position_weight,
+                'loss_confidence_weight': base_config.training.loss_confidence_weight,
+                'loss_eos_coef': base_config.training.loss_eos_coef,
+                'get': lambda self, key, default=None: getattr(self, key, default)
+            })(),
+            use_focal_loss=getattr(base_config.training, 'use_focal_loss', False)
+        )
+    elif base_config.training.loss_type == 'bce':
         criterion = torch.nn.BCEWithLogitsLoss(
             pos_weight=torch.tensor(base_config.training.loss_pos_weight)
         )
@@ -215,67 +233,179 @@ def train_boundary_model(config_dict: Dict[str, Any],
     # Start from epoch 0 (no checkpoint loading)
     start_epoch = 0
 
-    # Determine loss output type
-    distribution_losses = ['dist_ce', 'kl_div', 'js_div', 'focal_dist_ce']
-    raw_output_losses = ['mse_raw']
+    if is_detr:
+        # DETR training loop
+        from training.detr_trainer import train_detr, move_targets_to_device
 
-    use_distribution_loss = base_config.training.loss_type in distribution_losses
-    use_raw_output = base_config.training.loss_type in raw_output_losses
+        # Convert metric tolerances to frame-based
+        metric_tolerances = getattr(base_config.training, 'metric_tolerances', [1.0, 2.0, 3.0])
+        tolerance_frames = [tol * base_config.data.fps for tol in metric_tolerances]
 
-    # Create trainer (without callbacks for Ray Tune)
-    trainer = BoundaryTrainer(
-        model=model,
-        optimizer=optimizer,
-        criterion=criterion,
-        device=device,
-        callbacks=[],  # No callbacks for tuning
-        scheduler=scheduler,
-        prediction_stride=base_config.data.stride,
-        prediction_window_size=base_config.model.prediction_window_size,
-        classification_threshold=base_config.training.classification_threshold,
-        use_distribution_loss=use_distribution_loss,
-        use_raw_output=use_raw_output,
-        freq_multiplier=train_dataset.freq_multiplier,
-        peak_detection_distance=base_config.training.peak_detection_distance,
-        iou_window_size=base_config.training.iou_window_size,
-        metric_tolerances=base_config.training.metric_tolerances,
-        train_task_ids=base_config.data.train_task_ids
-    )
+        # Training loop with Ray Tune reporting
+        for epoch in range(start_epoch, base_config.training.num_epochs):
+            # Training
+            model.train()
+            train_loss_sum = 0.0
+            train_metrics_sum = {}
+            for tol in tolerance_frames:
+                train_metrics_sum[f'precision@{tol}'] = 0.0
+                train_metrics_sum[f'recall@{tol}'] = 0.0
+                train_metrics_sum[f'f1@{tol}'] = 0.0
+            num_train_batches = 0
 
-    # Training loop with Ray Tune reporting
-    for epoch in range(start_epoch, base_config.training.num_epochs):
-        # Set current epoch for trainer
-        trainer.current_epoch = epoch
+            for batch in train_loader:
+                tokenized_actions = batch['tokenized_actions'].to(device)
+                dino_features = batch['dino_features'].to(device)
+                targets = move_targets_to_device(batch['targets'], device)
 
-        # Train for one epoch
-        train_metrics = trainer._train_epoch(train_loader, log_every=10, collect_trajectory_data=False)
+                predictions = model(tokenized_actions, None, dino_features)
+                losses = criterion(predictions, targets)
+                loss = losses['loss_total']
 
-        # Validate
-        val_metrics = trainer._validate_epoch(val_loader, collect_trajectory_data=False)
+                optimizer.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.1)
+                optimizer.step()
 
-        # Update learning rate scheduler if present
-        if scheduler is not None:
-            scheduler.step()
+                train_loss_sum += loss.item()
 
-        # Prepare metrics for Ray Tune
-        metrics = {
-            'train_loss': train_metrics['loss'],
-            'val_loss': val_metrics['loss'],
-            'val_f1': val_metrics['f1_score'],
-            'val_precision': val_metrics['precision'],
-            'val_recall': val_metrics['recall'],
-            'epoch': epoch
-        }
+                # Compute metrics
+                batch_metrics = compute_detr_metrics(
+                    predictions, targets, base_config.model.prediction_window_size,
+                    getattr(base_config.training, 'confidence_threshold', 0.5),
+                    tolerance_frames
+                )
+                for key, value in batch_metrics.items():
+                    if key in train_metrics_sum:
+                        train_metrics_sum[key] += value
 
-        # Add tolerance-specific metrics
-        if 'metrics_by_tolerance' in val_metrics:
-            for tol, tol_metrics in val_metrics['metrics_by_tolerance'].items():
-                metrics[f'val_f1_tol_{tol}'] = tol_metrics.get('f1_score', 0.0)
-                metrics[f'val_precision_tol_{tol}'] = tol_metrics.get('precision', 0.0)
-                metrics[f'val_recall_tol_{tol}'] = tol_metrics.get('recall', 0.0)
+                num_train_batches += 1
 
-        # Report metrics to Ray Tune (without checkpoints)
-        tune.report(metrics)
+            avg_train_loss = train_loss_sum / num_train_batches
+            avg_train_metrics = {k: v / num_train_batches for k, v in train_metrics_sum.items()}
+
+            # Validation
+            model.eval()
+            val_loss_sum = 0.0
+            val_metrics_sum = {}
+            for tol in tolerance_frames:
+                val_metrics_sum[f'precision@{tol}'] = 0.0
+                val_metrics_sum[f'recall@{tol}'] = 0.0
+                val_metrics_sum[f'f1@{tol}'] = 0.0
+            num_val_batches = 0
+
+            with torch.no_grad():
+                for batch in val_loader:
+                    tokenized_actions = batch['tokenized_actions'].to(device)
+                    dino_features = batch['dino_features'].to(device)
+                    targets = move_targets_to_device(batch['targets'], device)
+
+                    predictions = model(tokenized_actions, None, dino_features)
+                    losses = criterion(predictions, targets)
+
+                    val_loss_sum += losses['loss_total'].item()
+
+                    batch_metrics = compute_detr_metrics(
+                        predictions, targets, base_config.model.prediction_window_size,
+                        getattr(base_config.training, 'confidence_threshold', 0.5),
+                        tolerance_frames
+                    )
+                    for key, value in batch_metrics.items():
+                        if key in val_metrics_sum:
+                            val_metrics_sum[key] += value
+
+                    num_val_batches += 1
+
+            avg_val_loss = val_loss_sum / num_val_batches
+            avg_val_metrics = {k: v / num_val_batches for k, v in val_metrics_sum.items()}
+
+            # Update scheduler
+            if scheduler is not None:
+                scheduler.step()
+
+            # Prepare metrics for Ray Tune
+            first_tol = tolerance_frames[0]
+            metrics = {
+                'train_loss': avg_train_loss,
+                'val_loss': avg_val_loss,
+                'val_f1': avg_val_metrics.get(f'f1@{first_tol}', 0.0),
+                'val_precision': avg_val_metrics.get(f'precision@{first_tol}', 0.0),
+                'val_recall': avg_val_metrics.get(f'recall@{first_tol}', 0.0),
+                'epoch': epoch
+            }
+
+            # Add tolerance-specific metrics
+            for tol in tolerance_frames:
+                metrics[f'val_f1_tol_{tol}'] = avg_val_metrics.get(f'f1@{tol}', 0.0)
+                metrics[f'val_precision_tol_{tol}'] = avg_val_metrics.get(f'precision@{tol}', 0.0)
+                metrics[f'val_recall_tol_{tol}'] = avg_val_metrics.get(f'recall@{tol}', 0.0)
+
+            # Report to Ray Tune
+            tune.report(metrics)
+
+    else:
+        # Regular BoundaryTrainer loop
+        # Determine loss output type
+        distribution_losses = ['dist_ce', 'kl_div', 'js_div', 'focal_dist_ce']
+        raw_output_losses = ['mse_raw']
+
+        use_distribution_loss = base_config.training.loss_type in distribution_losses
+        use_raw_output = base_config.training.loss_type in raw_output_losses
+
+        # Create trainer (without callbacks for Ray Tune)
+        trainer = BoundaryTrainer(
+            model=model,
+            optimizer=optimizer,
+            criterion=criterion,
+            device=device,
+            callbacks=[],  # No callbacks for tuning
+            scheduler=scheduler,
+            prediction_stride=base_config.data.stride,
+            prediction_window_size=base_config.model.prediction_window_size,
+            classification_threshold=base_config.training.classification_threshold,
+            use_distribution_loss=use_distribution_loss,
+            use_raw_output=use_raw_output,
+            freq_multiplier=train_dataset.freq_multiplier,
+            peak_detection_distance=base_config.training.peak_detection_distance,
+            iou_window_size=base_config.training.iou_window_size,
+            metric_tolerances=base_config.training.metric_tolerances,
+            train_task_ids=base_config.data.train_task_ids
+        )
+
+        # Training loop with Ray Tune reporting
+        for epoch in range(start_epoch, base_config.training.num_epochs):
+            # Set current epoch for trainer
+            trainer.current_epoch = epoch
+
+            # Train for one epoch
+            train_metrics = trainer._train_epoch(train_loader, log_every=10, collect_trajectory_data=False)
+
+            # Validate
+            val_metrics = trainer._validate_epoch(val_loader, collect_trajectory_data=False)
+
+            # Update learning rate scheduler if present
+            if scheduler is not None:
+                scheduler.step()
+
+            # Prepare metrics for Ray Tune
+            metrics = {
+                'train_loss': train_metrics['loss'],
+                'val_loss': val_metrics['loss'],
+                'val_f1': val_metrics['f1_score'],
+                'val_precision': val_metrics['precision'],
+                'val_recall': val_metrics['recall'],
+                'epoch': epoch
+            }
+
+            # Add tolerance-specific metrics
+            if 'metrics_by_tolerance' in val_metrics:
+                for tol, tol_metrics in val_metrics['metrics_by_tolerance'].items():
+                    metrics[f'val_f1_tol_{tol}'] = tol_metrics.get('f1_score', 0.0)
+                    metrics[f'val_precision_tol_{tol}'] = tol_metrics.get('precision', 0.0)
+                    metrics[f'val_recall_tol_{tol}'] = tol_metrics.get('recall', 0.0)
+
+            # Report metrics to Ray Tune (without checkpoints)
+            tune.report(metrics)
 
 
 def parse_args() -> argparse.Namespace:
