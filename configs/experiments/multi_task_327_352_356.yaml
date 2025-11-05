@@ -62,10 +62,10 @@ training:
   loss_gamma: 2.551
 
   # Metrics
-  classification_threshold: 0.40
+  classification_threshold: 0.32
   peak_detection_distance: 2.0
   iou_window_size: 2.0
-  metric_tolerances: [1.0, 3.0, 5.0]
+  metric_tolerances: [1.0, 2.0, 3.0, 4.0, 5.0]
 
   # Regularization
   gradient_clip_val: null

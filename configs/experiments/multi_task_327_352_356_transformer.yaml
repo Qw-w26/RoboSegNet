@@ -1,0 +1,130 @@
+# Multi-task experiment with Cross-Modal Transformer Architecture
+# Enhanced model with temporal visual encoding and cross-modal attention
+
+experiment_name: multi_task_327_352_356_transformer
+
+model:
+  # Architecture type (NEW)
+  architecture: "cross_modal_transformer"
+
+  # Basic settings
+  vocab_size: 2048
+  token_embed_dim: 192
+  num_dino_frames: 6  # Number of DINO frames (will auto-calculate dino_feature_dim)
+  prediction_window_size: 18
+
+  # Feature modalities
+  use_proprio: true
+  use_dino: true
+
+  # Visual encoder settings (NEW)
+  visual_hidden_dim: 256
+  visual_dropout: 0.3
+
+  # Cross-modal attention settings (NEW)
+  cross_modal_dim: 512
+  attention_dropout: 0.1
+  num_attention_heads: 8
+
+  # Temporal transformer settings (NEW)
+  temporal_layers: 3
+  temporal_dropout: 0.1
+  temporal_feedforward_dim: 2048
+
+  # Output settings (NEW)
+  output_dropout: 0.3
+  use_cls_token: true
+
+  # Legacy settings (for TinyFASTEncoder)
+  transformer_dropout: 0.190711
+  embedding_dropout: 0.18593
+  feature_noise_std: 0.0378358
+
+data:
+  # Multi-task configuration
+  meta_dir: /shared/projects/agibot/full_dataset/
+  train_task_ids: [327, 352, 354, 356, 357, 358, 359, 360, 365, 366, 367, 368, 372, 374, 375, 376, 377, 378, 380, 384, 385, 389, 390]
+  eval_task_ids: [327, 352, 354, 356, 357, 358, 359, 360, 365, 366, 367, 368, 372, 374, 375, 376, 377, 378, 380, 384, 385, 389, 390]
+  # train_task_ids: [327]
+  # eval_task_ids: [327]
+  cache_dir: ./cache
+
+  # Dataset parameters
+  window_size: 18
+  stride: 1
+  fps: 2.0
+  action_dim: 14
+  num_dino_frames: 6
+
+  # DataLoader (reduced batch size for larger model)
+  batch_size: 4096  # Best from trial fff8d86c
+  num_workers: 16
+  pin_memory: true
+
+  # Feature extraction
+  vocab_size: 2048
+  label_smoother_type: gaussian
+  label_smoother_sigma: 1.0
+  label_smoother_peak_value: 1.0
+
+  # Processing
+  ray_num_workers: 4
+  max_samples: null
+
+training:
+  num_epochs: 5000
+
+  # Lower learning rate for transformers
+  learning_rate: 4.79739e-05  # Best from trial fff8d86c
+  weight_decay: 0.000835168
+  optimizer: adam
+
+  # Warmup for transformers (NEW)
+  warmup_steps: 1000
+
+  # Scheduler
+  scheduler: cosine
+  min_lr: 0.000001
+
+  # Loss
+  loss_type: mse
+  loss_pos_weight: 14.1348
+  loss_alpha: 0.119265
+  loss_gamma: 1.37688
+
+  # Metrics
+  classification_threshold: 0.470014
+  peak_detection_distance: 2.0
+  iou_window_size: 2.0
+  metric_tolerances: [1.0, 2.0, 3.0, 4.0, 5.0]
+
+  # Regularization (updated for transformers)
+  gradient_clip_val: 1.0  # Important for transformer training
+  use_amp: true  # Mixed precision for efficiency
+
+  # Checkpointing
+  checkpoint_dir: ./checkpoints/multi_task_327_352_356_transformer
+  save_every: 10
+  save_best_only: true
+
+  # Early stopping
+  early_stopping: false
+  patience: 10
+
+  # Logging
+  log_every: 10
+  log_plots_every: 3
+  num_plots: 3
+
+  # System
+  device: auto
+  seed: 42
+
+wandb:
+  enabled: true
+  project: task-segmentation
+  name: multi_task_327_352_356_transformer
+  tags: [multi_task, transformer, cross_modal_attention, temporal_modeling]
+  notes: "Cross-modal transformer with temporal visual encoding and attention-based fusion"
+  mode: online
+  log_model: true

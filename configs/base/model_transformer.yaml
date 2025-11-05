@@ -1,0 +1,39 @@
+# Cross-Modal Transformer Model Configuration
+# Enhanced architecture with temporal modeling and cross-modal attention
+
+# Architecture type
+architecture: "cross_modal_transformer"
+
+# Basic model settings (same as baseline)
+vocab_size: 2048
+token_embed_dim: 1024
+dino_feature_dim: 3072  # 3 frames * 1024
+prediction_window_size: 360
+
+# Feature modalities
+use_proprio: true
+use_dino: true
+
+# Visual encoder settings (NEW)
+num_visual_frames: 3
+visual_hidden_dim: 256
+visual_dropout: 0.3
+
+# Cross-modal attention settings (NEW)
+cross_modal_dim: 512
+attention_dropout: 0.1
+num_attention_heads: 8
+
+# Temporal transformer settings (NEW)
+temporal_layers: 3
+temporal_dropout: 0.1
+temporal_feedforward_dim: 2048
+
+# Output settings (NEW)
+output_dropout: 0.3
+use_cls_token: true
+
+# Legacy settings (for TinyFASTEncoder compatibility)
+transformer_dropout: 0.3
+embedding_dropout: 0.1
+feature_noise_std: 0.05

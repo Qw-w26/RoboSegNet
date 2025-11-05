@@ -21,7 +21,10 @@ import yaml
 class ModelConfig:
     """Model architecture configuration.
 
+    Supports both MLP and Cross-Modal Transformer architectures.
+
     Attributes:
+        architecture: Architecture type ('mlp' or 'cross_modal_transformer')
         vocab_size: Tokenizer vocabulary size
         token_embed_dim: Dimension of token embeddings
         num_dino_frames: Number of DINO frames to sample per window (evenly spaced)
@@ -30,27 +33,60 @@ class ModelConfig:
         prediction_window_size: Number of frames to predict boundaries for
         use_proprio: Whether to use proprioceptive features
         use_dino: Whether to use DINO visual features
+
+        # Dropout settings (common)
         transformer_dropout: Dropout for transformer layers
         embedding_dropout: Dropout for embedding layers
-        dino_encoder_dropout: Dropout for DINO encoder
-        mlp_dropout: Dropout for MLP layers
+        dino_encoder_dropout: Dropout for DINO encoder (MLP only)
+        mlp_dropout: Dropout for MLP layers (MLP only)
         feature_noise_std: Standard deviation for feature noise augmentation
+
+        # Transformer-specific settings
+        num_visual_frames: Number of visual frames (same as num_dino_frames)
+        visual_hidden_dim: Hidden dim for visual encoder
+        visual_dropout: Dropout for visual encoder
+        cross_modal_dim: Hidden dim for cross-modal attention
+        attention_dropout: Dropout for attention layers
+        num_attention_heads: Number of attention heads
+        temporal_layers: Number of temporal transformer layers
+        temporal_dropout: Dropout for temporal transformer
+        temporal_feedforward_dim: Feedforward dim in temporal transformer
+        output_dropout: Dropout before final prediction
+        use_cls_token: Whether to use CLS token
     """
+    # Architecture type
+    architecture: str = 'mlp'
+
+    # Basic settings
     vocab_size: int = 2048
     token_embed_dim: int = 128
-    num_dino_frames: int = 3  # Number of DINO frames to sample per window
-    dino_feature_dim: Optional[int] = None  # Auto-calculated as num_dino_frames * 1024
+    num_dino_frames: int = 3
+    dino_feature_dim: Optional[int] = None
     hidden_dims: List[int] = field(default_factory=lambda: [512, 256, 128])
     prediction_window_size: int = 18
 
     use_proprio: bool = True
     use_dino: bool = True
 
+    # Common dropout settings
     transformer_dropout: float = 0.3
     embedding_dropout: float = 0.1
     dino_encoder_dropout: float = 0.3
     mlp_dropout: float = 0.3
     feature_noise_std: float = 0.05
+
+    # Transformer-specific settings (optional)
+    num_visual_frames: Optional[int] = None
+    visual_hidden_dim: int = 256
+    visual_dropout: float = 0.3
+    cross_modal_dim: int = 512
+    attention_dropout: float = 0.1
+    num_attention_heads: int = 8
+    temporal_layers: int = 3
+    temporal_dropout: float = 0.1
+    temporal_feedforward_dim: int = 2048
+    output_dropout: float = 0.3
+    use_cls_token: bool = True
 
     def __post_init__(self):
         if not (self.use_proprio or self.use_dino):
@@ -66,6 +102,10 @@ class ModelConfig:
             print(f"Warning: dino_feature_dim ({self.dino_feature_dim}) does not match "
                   f"num_dino_frames * 1024 ({expected_dim}). Overriding to {expected_dim}.")
             self.dino_feature_dim = expected_dim
+
+        # Set num_visual_frames to match num_dino_frames if not specified
+        if self.num_visual_frames is None:
+            self.num_visual_frames = self.num_dino_frames
 
 
 @dataclass
@@ -151,6 +191,7 @@ class TrainingConfig:
         # Scheduler
         scheduler: Learning rate scheduler ('cosine', 'step', 'plateau', None)
         min_lr: Minimum learning rate
+        warmup_steps: Number of warmup steps for learning rate scheduler (0 = no warmup)
 
         # Loss
         loss_type: Loss function type
@@ -200,6 +241,7 @@ class TrainingConfig:
     # Scheduler
     scheduler: Optional[str] = 'cosine'
     min_lr: float = 1e-6
+    warmup_steps: int = 0
 
     # Loss
     loss_type: str = 'bce'

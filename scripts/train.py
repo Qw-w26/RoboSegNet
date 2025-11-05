@@ -39,7 +39,7 @@ import torch
 import torch.optim as optim
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
@@ -60,6 +60,34 @@ from training import (
 )
 from data import load_parquet_split
 from utils.reproducibility import set_all_seeds
+
+
+def get_warmup_cosine_scheduler(optimizer, warmup_steps, total_steps, min_lr, base_lr):
+    """Create a learning rate scheduler with linear warmup and cosine annealing.
+
+    Args:
+        optimizer: PyTorch optimizer
+        warmup_steps: Number of warmup steps
+        total_steps: Total number of training steps
+        min_lr: Minimum learning rate after cosine decay
+        base_lr: Base learning rate (max learning rate after warmup)
+
+    Returns:
+        LambdaLR scheduler
+    """
+    def lr_lambda(current_step):
+        if current_step < warmup_steps:
+            # Linear warmup
+            return float(current_step) / float(max(1, warmup_steps))
+
+        # Cosine decay after warmup
+        progress = float(current_step - warmup_steps) / float(max(1, total_steps - warmup_steps))
+        cosine_decay = 0.5 * (1.0 + torch.cos(torch.tensor(progress * 3.14159265359)))
+
+        # Scale between min_lr and base_lr
+        return min_lr / base_lr + (1.0 - min_lr / base_lr) * cosine_decay
+
+    return LambdaLR(optimizer, lr_lambda)
 
 
 def setup_distributed():
@@ -313,11 +341,29 @@ def main():
     # Create scheduler
     scheduler = None
     if config.training.scheduler == 'cosine':
-        scheduler = CosineAnnealingLR(
-            optimizer,
-            T_max=config.training.num_epochs,
-            eta_min=config.training.min_lr
-        )
+        # Check if warmup is specified
+        warmup_steps = getattr(config.training, 'warmup_steps', 0)
+
+        if warmup_steps > 0:
+            # Use warmup scheduler with cosine annealing
+            # Calculate total steps (approximate, using epochs and dataset size)
+            # This will be updated in the training loop for step-based scheduling
+            total_steps = config.training.num_epochs * 1000  # Placeholder
+
+            scheduler = get_warmup_cosine_scheduler(
+                optimizer,
+                warmup_steps=warmup_steps,
+                total_steps=total_steps,
+                min_lr=config.training.min_lr,
+                base_lr=config.training.learning_rate
+            )
+        else:
+            # Use standard cosine annealing (epoch-based)
+            scheduler = CosineAnnealingLR(
+                optimizer,
+                T_max=config.training.num_epochs,
+                eta_min=config.training.min_lr
+            )
 
     # Create loss function
     if config.training.loss_type == 'bce':
