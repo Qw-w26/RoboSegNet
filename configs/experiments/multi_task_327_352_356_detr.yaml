@@ -102,8 +102,10 @@ training:
 
   # Metrics (for evaluation)
   confidence_threshold: 0.5  # Threshold for filtering predictions
-  boundary_tolerance: 2.0  # Tolerance in frames for matching (±2 frames)
-  metric_tolerances: [1.0, 2.0, 3.0, 4.0, 5.0]
+  # boundary_tolerance: 2.0  # Tolerance in frames for matching (±2 frames)
+  metric_tolerances: [1.0, 2.0, 3.0]
+  # mAP computation settings
+  confidence_thresholds_for_map: [0.3, 0.4, 0.5]
 
   # Regularization (CRITICAL for DETR stability)
   gradient_clip_val: 0.1  # Aggressive clipping for DETR

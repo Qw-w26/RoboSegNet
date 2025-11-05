@@ -469,7 +469,10 @@ class BoundaryDataset(Dataset):
 def collate_dict(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Custom collate function for dict-based batches.
 
-    Handles dino_features as a list of tensors that get stacked per frame.
+    Handles dino_features as a list of tensors that get properly stacked and flattened.
+    Also renames keys to match model expectations:
+    - proprio_features -> tokenized_actions
+    - train_labels -> label
     """
     if len(batch) == 0:
         return {}
@@ -481,17 +484,29 @@ def collate_dict(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
     for key in keys:
         # Handle dino_features (list of tensors)
         if key == 'dino_features':
-            # Stack each frame across batch: [(B, 1024), (B, 1024), ...]
+            # Stack each frame across batch, then concatenate along feature dim
+            # Input: batch of [tensor(1024), tensor(1024), ...] (num_frames tensors)
+            # Output: (batch_size, num_frames * 1024)
             num_frames = len(batch[0][key])
-            collated[key] = [
+            # Stack each frame: [(batch, 1024), (batch, 1024), ...]
+            stacked_frames = [
                 torch.stack([sample[key][i] for sample in batch])
                 for i in range(num_frames)
             ]
+            # Concatenate along feature dimension: (batch, num_frames * 1024)
+            collated[key] = torch.cat(stacked_frames, dim=1)
         # Handle tensors
         elif isinstance(batch[0][key], torch.Tensor):
             collated[key] = torch.stack([sample[key] for sample in batch])
         # Handle lists
         else:
             collated[key] = [sample[key] for sample in batch]
+
+    # Rename keys to match model expectations
+    # Keep both names for compatibility with different parts of the codebase
+    if 'proprio_features' in collated:
+        collated['tokenized_actions'] = collated['proprio_features']
+    if 'train_labels' in collated:
+        collated['label'] = collated['train_labels']
 
     return collated

@@ -1285,8 +1285,8 @@ class BoundaryTrainer(Trainer):
         """
         # Move data to device
         tokenized_actions = batch['proprio_features'].to(self.device)
-        # Concatenate DINO frames: list of tensors [(B, 1024), (B, 1024), ...]
-        dino_features = torch.cat(batch['dino_features'], dim=1).to(self.device)
+        # DINO features are already concatenated by collate function: (batch, num_frames * 1024)
+        dino_features = batch['dino_features'].to(self.device)
         labels = batch['train_labels'].to(self.device)
 
         # Crop labels to prediction window

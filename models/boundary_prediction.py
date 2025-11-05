@@ -69,6 +69,9 @@ class ModelConfig:
     use_proprio: bool = True
     use_dino: bool = True
 
+    # Fusion mode (for compatibility with other model configs, unused in MLP)
+    fusion_mode: str = "cross_attention"
+
     def __post_init__(self):
         """Validate configuration."""
         if not (self.use_proprio or self.use_dino):

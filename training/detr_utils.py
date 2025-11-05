@@ -133,7 +133,8 @@ def compute_detr_metrics(
     targets: List[Dict[str, torch.Tensor]],
     window_size: int,
     confidence_threshold: float = 0.5,
-    tolerances: List[float] = None
+    tolerances: List[float] = None,
+    confidence_thresholds_for_map: List[float] = None
 ) -> Dict[str, float]:
     """Compute evaluation metrics for DETR predictions at multiple tolerances.
 
@@ -143,12 +144,16 @@ def compute_detr_metrics(
         window_size: Window size in frames
         confidence_threshold: Minimum confidence to count as detection
         tolerances: List of matching tolerances in frames
+        confidence_thresholds_for_map: List of confidence thresholds for mAP calculation
 
     Returns:
-        Dictionary with precision, recall, F1 at each tolerance, and counts
+        Dictionary with precision, recall, F1 at each tolerance, counts, and mAP
     """
     if tolerances is None:
         tolerances = [2.0]
+    if confidence_thresholds_for_map is None:
+        confidence_thresholds_for_map = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+
     pred_positions = predictions['pred_positions']  # (batch, num_queries)
     pred_confidences = predictions['pred_confidences']
 
@@ -216,5 +221,82 @@ def compute_detr_metrics(
     results['precision'] = results[f'precision@{first_tol}']
     results['recall'] = results[f'recall@{first_tol}']
     results['f1'] = results[f'f1@{first_tol}']
+
+    # Compute mAP (mean Average Precision) across tolerances and confidence thresholds
+    ap_per_tolerance = {}
+
+    for tolerance in tolerances:
+        # Collect precision-recall pairs at different confidence thresholds
+        pr_pairs = []
+
+        for conf_thresh in sorted(confidence_thresholds_for_map):
+            total_tp = 0
+            total_fp = 0
+            total_fn = 0
+
+            for b in range(batch_size):
+                # Get predictions above threshold
+                valid_mask = pred_confidences[b] > conf_thresh
+                pred_pos = pred_positions[b][valid_mask]
+                pred_conf = pred_confidences[b][valid_mask]
+
+                if len(pred_pos) == 0:
+                    pred_frames = []
+                else:
+                    # Convert to frame indices
+                    pred_frames = (pred_pos * window_size).detach().cpu().numpy()
+
+                # Get ground truth
+                gt_pos = targets[b]['positions']
+                if len(gt_pos) == 0:
+                    gt_frames = []
+                else:
+                    gt_frames = (gt_pos * window_size).detach().cpu().numpy()
+
+                # Match predictions to GT
+                matched_pred = set()
+                matched_gt = set()
+
+                for i, pred_frame in enumerate(pred_frames):
+                    for j, gt_frame in enumerate(gt_frames):
+                        if j not in matched_gt and abs(pred_frame - gt_frame) <= tolerance:
+                            matched_pred.add(i)
+                            matched_gt.add(j)
+                            break
+
+                tp = len(matched_pred)
+                fp = len(pred_frames) - tp
+                fn = len(gt_frames) - len(matched_gt)
+
+                total_tp += tp
+                total_fp += fp
+                total_fn += fn
+
+            # Compute precision and recall at this confidence threshold
+            precision = total_tp / (total_tp + total_fp) if (total_tp + total_fp) > 0 else 0.0
+            recall = total_tp / (total_tp + total_fn) if (total_tp + total_fn) > 0 else 0.0
+
+            pr_pairs.append((recall, precision))
+
+        # Sort by recall (ascending)
+        pr_pairs = sorted(pr_pairs, key=lambda x: x[0])
+
+        # Compute Average Precision using 11-point interpolation
+        ap = 0.0
+        for recall_threshold in np.linspace(0, 1, 11):
+            # Find maximum precision for recall >= recall_threshold
+            precisions_above_threshold = [p for r, p in pr_pairs if r >= recall_threshold]
+            if len(precisions_above_threshold) > 0:
+                ap += max(precisions_above_threshold)
+        ap /= 11.0
+
+        ap_per_tolerance[tolerance] = ap
+        results[f'ap@{tolerance}'] = ap
+
+    # Compute mAP as average of APs across tolerances
+    if len(ap_per_tolerance) > 0:
+        results['map'] = sum(ap_per_tolerance.values()) / len(ap_per_tolerance)
+    else:
+        results['map'] = 0.0
 
     return results

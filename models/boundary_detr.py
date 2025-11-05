@@ -96,6 +96,10 @@ class BoundaryDETRConfig:
     use_proprio: bool = True
     use_dino: bool = True
 
+    # Fusion mode when both modalities are present
+    # Options: "cross_attention" (default), "concat", "add"
+    fusion_mode: str = "cross_attention"
+
     # Legacy
     transformer_dropout: float = 0.3
     embedding_dropout: float = 0.1
@@ -394,17 +398,35 @@ class BoundaryDETR(nn.Module):
             )
 
         # Cross-modal fusion (reuse if both modalities present)
+        self.fusion_mode = config.fusion_mode if (config.use_proprio and config.use_dino) else None
+
         if config.use_proprio and config.use_dino:
-            from .boundary_prediction_transformer import CrossModalAttention
-            self.cross_modal = CrossModalAttention(
-                type('Config', (), {
-                    'token_embed_dim': config.token_embed_dim,
-                    'visual_hidden_dim': config.visual_hidden_dim,
-                    'cross_modal_dim': config.cross_modal_dim,
-                    'num_attention_heads': config.num_attention_heads,
-                    'attention_dropout': config.attention_dropout
-                })()
-            )
+            if config.fusion_mode == "cross_attention":
+                from .boundary_prediction_transformer import CrossModalAttention
+                self.cross_modal = CrossModalAttention(
+                    type('Config', (), {
+                        'token_embed_dim': config.token_embed_dim,
+                        'visual_hidden_dim': config.visual_hidden_dim,
+                        'cross_modal_dim': config.cross_modal_dim,
+                        'num_attention_heads': config.num_attention_heads,
+                        'attention_dropout': config.attention_dropout
+                    })()
+                )
+            elif config.fusion_mode in ["concat", "add"]:
+                # Simple fusion without cross-attention
+                self.proprio_proj = nn.Linear(config.token_embed_dim, config.cross_modal_dim)
+                self.visual_proj = nn.Linear(config.visual_hidden_dim, config.cross_modal_dim)
+                if config.fusion_mode == "concat":
+                    # Additional projection for concatenated features
+                    self.concat_proj = nn.Linear(2 * config.cross_modal_dim, config.cross_modal_dim)
+            else:
+                raise ValueError(f"Unknown fusion_mode: {config.fusion_mode}")
+        elif config.use_proprio:
+            # Projection for proprioceptive-only to cross_modal_dim
+            self.proprio_proj = nn.Linear(config.token_embed_dim, config.cross_modal_dim)
+        elif config.use_dino:
+            # Projection for visual-only to cross_modal_dim
+            self.visual_proj = nn.Linear(config.visual_hidden_dim, config.cross_modal_dim)
 
         # DETR components (NEW)
         self.trajectory_encoder = TrajectoryEncoder(config)
@@ -449,15 +471,37 @@ class BoundaryDETR(nn.Module):
 
         # 2. Cross-modal fusion
         if self.use_proprio and self.use_dino:
-            fused_features = self.cross_modal(proprio_features, visual_sequence)
-            # fused_features: (batch, num_visual_frames, cross_modal_dim)
+            if self.fusion_mode == "cross_attention":
+                fused_features = self.cross_modal(proprio_features, visual_sequence)
+                # fused_features: (batch, num_visual_frames, cross_modal_dim)
+            elif self.fusion_mode == "concat":
+                # Simple concatenation: broadcast proprio to each visual frame, then concat
+                proprio_projected = self.proprio_proj(proprio_features)  # (batch, cross_modal_dim)
+                visual_projected = self.visual_proj(visual_sequence)  # (batch, num_frames, cross_modal_dim)
+
+                # Broadcast proprio to match visual sequence length
+                batch_size, num_frames, _ = visual_projected.shape
+                proprio_expanded = proprio_projected.unsqueeze(1).expand(batch_size, num_frames, -1)
+
+                # Concatenate along feature dimension, then project back to cross_modal_dim
+                concatenated = torch.cat([proprio_expanded, visual_projected], dim=-1)  # (batch, num_frames, 2*cross_modal_dim)
+                fused_features = self.concat_proj(concatenated)
+            elif self.fusion_mode == "add":
+                # Simple addition: broadcast and add
+                proprio_projected = self.proprio_proj(proprio_features)  # (batch, cross_modal_dim)
+                visual_projected = self.visual_proj(visual_sequence)  # (batch, num_frames, cross_modal_dim)
+
+                # Broadcast proprio to match visual sequence length and add
+                batch_size, num_frames, _ = visual_projected.shape
+                proprio_expanded = proprio_projected.unsqueeze(1).expand(batch_size, num_frames, -1)
+                fused_features = proprio_expanded + visual_projected  # (batch, num_frames, cross_modal_dim)
         elif self.use_proprio:
-            # Proprio only: expand to sequence
-            fused_features = proprio_features.unsqueeze(1)
+            # Proprio only: project and expand to sequence
+            proprio_projected = self.proprio_proj(proprio_features)  # (batch, cross_modal_dim)
+            fused_features = proprio_projected.unsqueeze(1)  # (batch, 1, cross_modal_dim)
         else:
-            # Visual only: use visual features directly
-            # But need to project to cross_modal_dim
-            fused_features = visual_sequence
+            # Visual only: project visual features to cross_modal_dim
+            fused_features = self.visual_proj(visual_sequence)  # (batch, num_frames, cross_modal_dim)
 
         # 3. Trajectory encoding (bidirectional context)
         encoded_trajectory = self.trajectory_encoder(fused_features)
@@ -548,9 +592,20 @@ class BoundaryDETR(nn.Module):
             )
 
         if self.use_proprio and self.use_dino:
-            stats['cross_modal'] = sum(
-                p.numel() for p in self.cross_modal.parameters()
-            )
+            if self.fusion_mode == "cross_attention":
+                stats['cross_modal'] = sum(
+                    p.numel() for p in self.cross_modal.parameters()
+                )
+            elif self.fusion_mode in ["concat", "add"]:
+                stats['fusion_proj'] = sum(
+                    p.numel() for p in self.proprio_proj.parameters()
+                ) + sum(
+                    p.numel() for p in self.visual_proj.parameters()
+                )
+                if self.fusion_mode == "concat":
+                    stats['fusion_proj'] += sum(
+                        p.numel() for p in self.concat_proj.parameters()
+                    )
 
         stats['trajectory_encoder'] = sum(
             p.numel() for p in self.trajectory_encoder.parameters()

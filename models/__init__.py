@@ -64,8 +64,20 @@ def create_model(config, device='cuda' if torch.cuda.is_available() else 'cpu'):
     if architecture == 'cross_modal_transformer':
         # Create transformer config if needed
         if not isinstance(config, TransformerModelConfig):
-            # Convert dict-like config to TransformerModelConfig
+            # Convert dict-like config to TransformerModelConfig, filtering relevant keys
+            transformer_config_keys = {
+                'architecture', 'vocab_size', 'token_embed_dim',
+                'num_dino_frames', 'dino_feature_dim', 'num_visual_frames',
+                'hidden_dims', 'dino_encoder_dropout', 'mlp_dropout', 'feature_noise_std',
+                'visual_hidden_dim', 'visual_dropout',
+                'cross_modal_dim', 'attention_dropout', 'num_attention_heads',
+                'temporal_layers', 'temporal_dropout', 'temporal_feedforward_dim',
+                'prediction_window_size', 'output_dropout', 'use_cls_token',
+                'use_proprio', 'use_dino', 'fusion_mode',
+                'transformer_dropout', 'embedding_dropout'
+            }
             config_dict = dict(config.items()) if hasattr(config, 'items') else vars(config)
+            config_dict = {k: v for k, v in config_dict.items() if k in transformer_config_keys}
             config = TransformerModelConfig(**config_dict)
 
         model = BoundaryPredictionTransformer(config=config, device=device)
@@ -82,7 +94,7 @@ def create_model(config, device='cuda' if torch.cuda.is_available() else 'cpu'):
                 'd_model', 'num_encoder_layers', 'num_decoder_layers',
                 'num_boundary_queries', 'detr_dropout', 'detr_feedforward_dim',
                 'prediction_window_size', 'use_proprio', 'use_dino',
-                'transformer_dropout', 'embedding_dropout'
+                'fusion_mode', 'transformer_dropout', 'embedding_dropout'
             }
             config_dict = dict(config.items()) if hasattr(config, 'items') else vars(config)
             config_dict = {k: v for k, v in config_dict.items() if k in detr_config_keys}
@@ -99,7 +111,7 @@ def create_model(config, device='cuda' if torch.cuda.is_available() else 'cpu'):
                 'hidden_dims', 'prediction_window_size',
                 'transformer_dropout', 'embedding_dropout',
                 'dino_encoder_dropout', 'mlp_dropout', 'feature_noise_std',
-                'use_proprio', 'use_dino'
+                'use_proprio', 'use_dino', 'fusion_mode'
             }
             config_dict = dict(config.items()) if hasattr(config, 'items') else vars(config)
             filtered_config = {k: v for k, v in config_dict.items() if k in model_config_keys}

@@ -33,6 +33,7 @@ class ModelConfig:
         prediction_window_size: Number of frames to predict boundaries for
         use_proprio: Whether to use proprioceptive features
         use_dino: Whether to use DINO visual features
+        fusion_mode: Fusion mode for multi-modal models ('cross_attention', 'concat', 'add')
 
         # Dropout settings (common)
         transformer_dropout: Dropout for transformer layers
@@ -75,6 +76,10 @@ class ModelConfig:
 
     use_proprio: bool = True
     use_dino: bool = True
+
+    # Fusion mode when both modalities are present (DETR and transformer)
+    # Options: "cross_attention" (default), "concat", "add"
+    fusion_mode: str = "cross_attention"
 
     # Common dropout settings
     transformer_dropout: float = 0.3
@@ -228,6 +233,7 @@ class TrainingConfig:
         iou_window_size: Window size (seconds) around transitions for IoU calculation
         metric_tolerances: List of tolerances (in seconds) for computing metrics
                           Predictions within tolerance of ground truth are considered matches
+        confidence_thresholds_for_map: List of confidence thresholds for mAP calculation (DETR only)
 
         # Regularization
         gradient_clip_val: Gradient clipping value (None to disable)
@@ -288,6 +294,7 @@ class TrainingConfig:
     peak_detection_distance: float = 5.0  # Minimum time (seconds) between detected peaks
     iou_window_size: float = 5.0          # Window size (seconds) around transitions for IoU
     metric_tolerances: List[float] = field(default_factory=lambda: [1.0, 2.0, 3.0])  # Tolerances (in seconds) for computing metrics
+    confidence_thresholds_for_map: Optional[List[float]] = None  # Confidence thresholds for mAP calculation (DETR)
 
     # Regularization
     gradient_clip_val: Optional[float] = None

@@ -104,6 +104,9 @@ class TransformerModelConfig:
     use_proprio: bool = True
     use_dino: bool = True
 
+    # Fusion mode when both modalities are present
+    fusion_mode: str = "cross_attention"
+
     # Legacy settings for TinyFASTEncoder
     transformer_dropout: float = 0.3
     embedding_dropout: float = DEFAULT_EMBEDDING_DROPOUT
