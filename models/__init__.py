@@ -11,6 +11,17 @@ from .boundary_prediction_transformer import (
     BoundaryPredictionTransformer,
     TransformerModelConfig
 )
+from .boundary_detr import (
+    BoundaryDETR,
+    BoundaryDETRConfig,
+    create_boundary_detr
+)
+from .detr_loss import (
+    HungarianMatcher,
+    SetCriterion,
+    FocalSetCriterion,
+    create_detr_criterion
+)
 from .encoders import TinyFASTEncoder, DinoFeatureEncoder
 from .losses import (
     FocalLoss,
@@ -58,6 +69,27 @@ def create_model(config, device='cuda' if torch.cuda.is_available() else 'cpu'):
             config = TransformerModelConfig(**config_dict)
 
         model = BoundaryPredictionTransformer(config=config, device=device)
+
+    elif architecture == 'boundary_detr':
+        # Create DETR model
+        if not isinstance(config, BoundaryDETRConfig):
+            # Convert dict-like config to BoundaryDETRConfig, filtering relevant keys
+            detr_config_keys = {
+                'architecture', 'vocab_size', 'token_embed_dim',
+                'num_dino_frames', 'dino_feature_dim',
+                'visual_hidden_dim', 'visual_dropout',
+                'cross_modal_dim', 'attention_dropout', 'num_attention_heads',
+                'd_model', 'num_encoder_layers', 'num_decoder_layers',
+                'num_boundary_queries', 'detr_dropout', 'detr_feedforward_dim',
+                'prediction_window_size', 'use_proprio', 'use_dino',
+                'transformer_dropout', 'embedding_dropout'
+            }
+            config_dict = dict(config.items()) if hasattr(config, 'items') else vars(config)
+            config_dict = {k: v for k, v in config_dict.items() if k in detr_config_keys}
+            config = BoundaryDETRConfig(**config_dict)
+
+        model = create_boundary_detr(config=config, device=device)
+
     else:
         # Default to MLP
         if not isinstance(config, ModelConfig):
@@ -82,9 +114,12 @@ def create_model(config, device='cuda' if torch.cuda.is_available() else 'cpu'):
 __all__ = [
     'BoundaryPredictionMLP',
     'BoundaryPredictionTransformer',
+    'BoundaryDETR',
     'ModelConfig',
     'TransformerModelConfig',
+    'BoundaryDETRConfig',
     'create_model',
+    'create_boundary_detr',
     'collate_dict',
     'TinyFASTEncoder',
     'DinoFeatureEncoder',
@@ -95,4 +130,8 @@ __all__ = [
     'WeightedBCELoss',
     'MSEProbabilityLoss',
     'get_loss_function',
+    'HungarianMatcher',
+    'SetCriterion',
+    'FocalSetCriterion',
+    'create_detr_criterion',
 ]

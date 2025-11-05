@@ -1,0 +1,39 @@
+# Boundary DETR Model Configuration
+# DETR-style set-based boundary detection with learned queries and Hungarian matching
+
+# Architecture type
+architecture: "boundary_detr"
+
+# Basic model settings
+vocab_size: 2048
+token_embed_dim: 1024
+
+# Visual encoding (reuse from baseline)
+num_dino_frames: 6
+dino_feature_dim: 6144  # 6 frames * 1024
+visual_hidden_dim: 256
+visual_dropout: 0.3
+
+# Cross-modal attention (reuse from baseline)
+cross_modal_dim: 512
+attention_dropout: 0.1
+num_attention_heads: 8
+
+# DETR-specific settings
+d_model: 512  # Transformer hidden dimension
+num_encoder_layers: 6  # Trajectory encoder depth
+num_decoder_layers: 6  # Boundary query decoder depth
+num_boundary_queries: 9  # Max boundaries per window (18 frames @ 2fps = 9s, ~1 boundary/s)
+detr_dropout: 0.1
+detr_feedforward_dim: 2048
+
+# Prediction
+prediction_window_size: 18  # Window size in frames
+
+# Feature modalities
+use_proprio: true
+use_dino: true
+
+# Legacy settings (for compatibility with existing encoders)
+transformer_dropout: 0.3
+embedding_dropout: 0.1

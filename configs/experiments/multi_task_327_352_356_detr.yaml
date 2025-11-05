@@ -1,0 +1,139 @@
+# Multi-task experiment with Boundary DETR Architecture
+# Set-based boundary detection with learned queries and Hungarian matching
+
+experiment_name: multi_task_327_352_356_detr
+
+model:
+  # Architecture type
+  architecture: "boundary_detr"
+
+  # Basic settings
+  vocab_size: 2048
+  token_embed_dim: 192
+  num_dino_frames: 6
+  prediction_window_size: 18
+
+  # Feature modalities
+  use_proprio: true
+  use_dino: true
+
+  # Visual encoder settings
+  visual_hidden_dim: 256
+  visual_dropout: 0.3
+
+  # Cross-modal attention settings
+  cross_modal_dim: 512
+  attention_dropout: 0.1
+  num_attention_heads: 8
+
+  # DETR-specific settings
+  d_model: 512
+  num_encoder_layers: 6
+  num_decoder_layers: 6
+  num_boundary_queries: 9  # Max 9 boundaries in 18-frame window
+  detr_dropout: 0.1
+  detr_feedforward_dim: 2048
+
+  # Legacy settings (for TinyFASTEncoder)
+  transformer_dropout: 0.190711
+  embedding_dropout: 0.18593
+
+data:
+  # Multi-task configuration
+  meta_dir: /shared/projects/agibot/full_dataset/
+  # train_task_ids: [327, 352, 354, 356, 357, 358, 359, 360, 365, 366, 367, 368, 372, 374, 375, 376, 377, 378, 380, 384, 385, 389, 390]
+  # eval_task_ids: [327, 352, 354, 356, 357, 358, 359, 360, 365, 366, 367, 368, 372, 374, 375, 376, 377, 378, 380, 384, 385, 389, 390]
+  train_task_ids: [327]
+  eval_task_ids: [327]
+  cache_dir: ./cache
+
+  # Dataset parameters
+  window_size: 18
+  stride: 1
+  fps: 2.0
+  action_dim: 14
+  num_dino_frames: 6
+
+  # DataLoader (smaller batch size for DETR)
+  batch_size: 64  # Smaller than baseline due to transformer complexity
+  num_workers: 16
+  pin_memory: true
+
+  # Feature extraction
+  vocab_size: 2048
+
+  # DETR-specific: Set-based targets (no label smoothing)
+  target_format: "set_based"  # Use set-based targets instead of dense labels
+
+  # Processing
+  ray_num_workers: 4
+  max_samples: null
+
+training:
+  num_epochs: 200  # DETR typically needs more epochs
+
+  # Learning rate (lower for DETR stability)
+  learning_rate: 0.0001  # Start conservative (1e-4)
+  weight_decay: 0.0001
+  optimizer: adamw  # AdamW recommended for transformers
+
+  # Warmup (critical for DETR)
+  warmup_steps: 2000  # 2000 steps warmup
+  warmup_start_lr: 0.0000001  # 1e-7
+
+  # Scheduler
+  scheduler: cosine
+  min_lr: 0.000001  # 1e-6
+
+  # DETR Loss settings
+  loss_type: "set_criterion"  # Use Hungarian matching loss
+  loss_position_weight: 5.0  # Weight for position L1 loss
+  loss_confidence_weight: 2.0  # Weight for confidence BCE loss
+  loss_eos_coef: 0.1  # Relative weight for "no boundary" class (lower = upweight positives)
+
+  # Optional: Use focal loss for confidence (helps with class imbalance)
+  use_focal_loss: false
+  loss_focal_alpha: 0.25  # Only used if use_focal_loss=true
+  loss_focal_gamma: 2.0
+
+  # Hungarian matcher costs (for matching, not final loss)
+  matcher_cost_position: 5.0
+  matcher_cost_confidence: 2.0
+
+  # Metrics (for evaluation)
+  confidence_threshold: 0.5  # Threshold for filtering predictions
+  boundary_tolerance: 2.0  # Tolerance in frames for matching (±2 frames)
+  metric_tolerances: [1.0, 2.0, 3.0, 4.0, 5.0]
+
+  # Regularization (CRITICAL for DETR stability)
+  gradient_clip_val: 0.1  # Aggressive clipping for DETR
+  gradient_clip_type: "norm"  # Clip by global norm
+  use_amp: true  # Mixed precision for efficiency
+
+  # Checkpointing
+  checkpoint_dir: ./checkpoints/multi_task_327_352_356_detr
+  save_every: 10
+  save_best_only: true
+  monitor_metric: "val/f1"  # Monitor F1 score
+
+  # Early stopping
+  early_stopping: true
+  patience: 20  # More patience for DETR
+
+  # Logging
+  log_every: 10
+  log_plots_every: 5
+  num_plots: 3
+
+  # System
+  device: auto
+  seed: 42
+
+wandb:
+  enabled: true
+  project: task-segmentation
+  name: multi_task_327_352_356_detr
+  tags: [multi_task, detr, set_based, hungarian_matching, learned_queries]
+  notes: "DETR-style boundary detection with learned queries and set-based supervision"
+  mode: online
+  log_model: true

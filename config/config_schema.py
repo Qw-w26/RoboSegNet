@@ -21,10 +21,10 @@ import yaml
 class ModelConfig:
     """Model architecture configuration.
 
-    Supports both MLP and Cross-Modal Transformer architectures.
+    Supports MLP, Cross-Modal Transformer, and DETR architectures.
 
     Attributes:
-        architecture: Architecture type ('mlp' or 'cross_modal_transformer')
+        architecture: Architecture type ('mlp', 'cross_modal_transformer', or 'boundary_detr')
         vocab_size: Tokenizer vocabulary size
         token_embed_dim: Dimension of token embeddings
         num_dino_frames: Number of DINO frames to sample per window (evenly spaced)
@@ -53,6 +53,14 @@ class ModelConfig:
         temporal_feedforward_dim: Feedforward dim in temporal transformer
         output_dropout: Dropout before final prediction
         use_cls_token: Whether to use CLS token
+
+        # DETR-specific settings
+        d_model: Transformer hidden dimension (DETR)
+        num_encoder_layers: Number of trajectory encoder layers (DETR)
+        num_decoder_layers: Number of boundary decoder layers (DETR)
+        num_boundary_queries: Max number of boundaries per window (DETR)
+        detr_dropout: Dropout for DETR transformer (DETR)
+        detr_feedforward_dim: Feedforward dimension in DETR (DETR)
     """
     # Architecture type
     architecture: str = 'mlp'
@@ -87,6 +95,14 @@ class ModelConfig:
     temporal_feedforward_dim: int = 2048
     output_dropout: float = 0.3
     use_cls_token: bool = True
+
+    # DETR-specific settings (optional)
+    d_model: int = 512
+    num_encoder_layers: int = 6
+    num_decoder_layers: int = 6
+    num_boundary_queries: int = 9
+    detr_dropout: float = 0.1
+    detr_feedforward_dim: int = 2048
 
     def __post_init__(self):
         if not (self.use_proprio or self.use_dino):
@@ -168,6 +184,9 @@ class DataConfig:
     label_smoother_sigma: float = 5.0
     label_smoother_peak_value: float = 1.0
 
+    # DETR-specific
+    target_format: str = 'dense'  # 'dense' or 'set_based' (for DETR)
+
     # Processing
     ray_num_workers: int = 4
     max_samples: Optional[int] = None
@@ -242,6 +261,7 @@ class TrainingConfig:
     scheduler: Optional[str] = 'cosine'
     min_lr: float = 1e-6
     warmup_steps: int = 0
+    warmup_start_lr: float = 1e-7  # Starting LR for warmup
 
     # Loss
     loss_type: str = 'bce'
@@ -249,8 +269,20 @@ class TrainingConfig:
     loss_alpha: float = 0.25
     loss_gamma: float = 2.0
 
+    # DETR-specific loss settings
+    loss_position_weight: float = 5.0       # Weight for position L1 loss (DETR)
+    loss_confidence_weight: float = 2.0     # Weight for confidence BCE loss (DETR)
+    loss_eos_coef: float = 0.1              # Relative weight for "no boundary" class (DETR)
+    use_focal_loss: bool = False            # Use focal loss for confidence (DETR)
+    loss_focal_alpha: float = 0.25          # Focal loss alpha (DETR)
+    loss_focal_gamma: float = 2.0           # Focal loss gamma (DETR)
+    matcher_cost_position: float = 5.0      # Position cost for matching (DETR)
+    matcher_cost_confidence: float = 2.0    # Confidence cost for matching (DETR)
+
     # Metrics
     classification_threshold: float = 0.5
+    confidence_threshold: float = 0.5       # Confidence threshold for DETR predictions
+    boundary_tolerance: float = 2.0         # Tolerance in frames for boundary matching
 
     # Evaluation parameters (time-based, will be scaled by freq_multiplier)
     peak_detection_distance: float = 5.0  # Minimum time (seconds) between detected peaks
@@ -259,12 +291,14 @@ class TrainingConfig:
 
     # Regularization
     gradient_clip_val: Optional[float] = None
+    gradient_clip_type: str = 'norm'  # 'norm' or 'value'
     use_amp: bool = False
 
     # Checkpointing
     checkpoint_dir: str = './checkpoints'
     save_every: int = 10
     save_best_only: bool = True
+    monitor_metric: str = 'val_loss'  # Metric to monitor for best model
 
     # Early stopping
     early_stopping: bool = False

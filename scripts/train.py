@@ -44,7 +44,7 @@ from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
 from config import load_config, validate_config, parse_cli_overrides
-from models import create_model
+from models import create_model, create_detr_criterion
 from models.losses import get_loss_function
 from training import (
     BoundaryDataset,
@@ -58,6 +58,7 @@ from training import (
     LearningRateSchedulerCallback,
     EmbeddingVisualizationCallback,
 )
+from training.detr_utils import collate_detr_batch, compute_detr_metrics
 from data import load_parquet_split
 from utils.reproducibility import set_all_seeds
 
@@ -259,6 +260,13 @@ def main():
         print(f"  Training samples: {len(train_dataset)}")
         print(f"  Validation samples: {len(val_dataset)}")
 
+    # Determine collate function based on architecture
+    is_detr = getattr(config.model, 'architecture', 'mlp') == 'boundary_detr'
+    collate_fn = collate_detr_batch if is_detr else collate_dict
+
+    if is_main_process(rank) and is_detr:
+        print("Using DETR collate function (set-based targets)")
+
     # Create data loaders with DistributedSampler
     if is_main_process(rank):
         print("\nCreating data loaders...")
@@ -284,7 +292,7 @@ def main():
         sampler=train_sampler,
         shuffle=(train_sampler is None),  # Only shuffle if not using sampler
         num_workers=config.data.num_workers,
-        collate_fn=collate_dict,
+        collate_fn=collate_fn,
         pin_memory=config.data.pin_memory,
         persistent_workers=True if config.data.num_workers > 0 else False,  # Keep workers alive
         prefetch_factor=2  # Prefetch 2 batches per worker
@@ -296,7 +304,7 @@ def main():
         sampler=val_sampler,
         shuffle=False,
         num_workers=config.data.num_workers,
-        collate_fn=collate_dict,
+        collate_fn=collate_fn,
         pin_memory=config.data.pin_memory,
         persistent_workers=True if config.data.num_workers > 0 else False,
         prefetch_factor=2
@@ -331,8 +339,9 @@ def main():
         if is_main_process(rank):
             print(f"Model wrapped with DistributedDataParallel (find_unused_parameters=True)")
 
-    # Create optimizer
-    optimizer = optim.Adam(
+    # Create optimizer (use AdamW for DETR)
+    optimizer_class = optim.AdamW if is_detr else optim.Adam
+    optimizer = optimizer_class(
         model.parameters(),
         lr=config.training.learning_rate,
         weight_decay=config.training.weight_decay
@@ -348,7 +357,7 @@ def main():
             # Use warmup scheduler with cosine annealing
             # Calculate total steps (approximate, using epochs and dataset size)
             # This will be updated in the training loop for step-based scheduling
-            total_steps = config.training.num_epochs * 1000  # Placeholder
+            total_steps = config.training.num_epochs * len(train_loader)
 
             scheduler = get_warmup_cosine_scheduler(
                 optimizer,
@@ -366,10 +375,24 @@ def main():
             )
 
     # Create loss function
-    if config.training.loss_type == 'bce':
+    if is_detr:
+        # Use DETR SetCriterion
+        criterion = create_detr_criterion(
+            type('Config', (), {
+                'num_boundary_queries': config.model.num_boundary_queries,
+                'loss_position_weight': config.training.loss_position_weight,
+                'loss_confidence_weight': config.training.loss_confidence_weight,
+                'loss_eos_coef': config.training.loss_eos_coef,
+                'get': lambda self, key, default=None: getattr(self, key, default)
+            })(),
+            use_focal_loss=getattr(config.training, 'use_focal_loss', False)
+        )
+        loss_type_name = 'SetCriterion (Hungarian matching)'
+    elif config.training.loss_type == 'bce':
         criterion = torch.nn.BCEWithLogitsLoss(
             pos_weight=torch.tensor(config.training.loss_pos_weight)
         )
+        loss_type_name = config.training.loss_type
     else:
         # Build kwargs based on loss type
         loss_kwargs = {}
@@ -391,11 +414,19 @@ def main():
             config.training.loss_type,
             **loss_kwargs
         )
+        loss_type_name = config.training.loss_type
 
     if is_main_process(rank):
-        print(f"Optimizer: Adam (lr={config.training.learning_rate}, wd={config.training.weight_decay})")
+        optimizer_name = "AdamW" if is_detr else "Adam"
+        print(f"Optimizer: {optimizer_name} (lr={config.training.learning_rate}, wd={config.training.weight_decay})")
         print(f"Scheduler: {config.training.scheduler}")
-        print(f"Loss: {config.training.loss_type}")
+        if is_detr:
+            print(f"Loss: {loss_type_name}")
+            print(f"  Position weight: {config.training.loss_position_weight}")
+            print(f"  Confidence weight: {config.training.loss_confidence_weight}")
+            print(f"  EOS coefficient: {config.training.loss_eos_coef}")
+        else:
+            print(f"Loss: {loss_type_name}")
 
     # Resume from checkpoint if specified
     start_epoch = 0
@@ -467,69 +498,111 @@ def main():
             scheduler_callback = LearningRateSchedulerCallback(scheduler)
             callbacks.append(scheduler_callback)
 
-    # Create trainer
+    # Create trainer or use custom loop for DETR
     if is_main_process(rank):
         print("\n" + "="*80)
         print("Initializing trainer...")
         print("="*80)
 
-    # Determine loss output type
-    distribution_losses = ['dist_ce', 'kl_div', 'js_div', 'focal_dist_ce']
-    raw_output_losses = ['mse_raw']  # Losses that use raw logits (no sigmoid/softmax)
-
-    use_distribution_loss = config.training.loss_type in distribution_losses
-    use_raw_output = config.training.loss_type in raw_output_losses
-
-    trainer = BoundaryTrainer(
-        model=model,
-        optimizer=optimizer,
-        criterion=criterion,
-        device=device,
-        callbacks=callbacks,
-        scheduler=scheduler,
-        prediction_stride=config.data.stride,
-        prediction_window_size=config.model.prediction_window_size,
-        classification_threshold=config.training.classification_threshold,
-        use_distribution_loss=use_distribution_loss,
-        use_raw_output=use_raw_output,
-        freq_multiplier=train_dataset.freq_multiplier,  # Get from dataset
-        peak_detection_distance=config.training.peak_detection_distance,
-        iou_window_size=config.training.iou_window_size,
-        metric_tolerances=config.training.metric_tolerances,
-        train_task_ids=config.data.train_task_ids  # For cross-task evaluation tracking
-    )
-
-    # Train
-    if is_main_process(rank):
-        print("\n" + "="*80)
-        print("Starting training...")
-        print("="*80)
-
-    try:
-        history = trainer.fit(
-            train_loader=train_loader,
-            val_loader=val_loader,
-            num_epochs=config.training.num_epochs,
-            log_every=config.training.log_every,
-            collect_plots_every=config.training.log_plots_every
-        )
+    if is_detr:
+        # Use custom training loop for DETR
+        from training.detr_trainer import train_detr
 
         if is_main_process(rank):
+            print("Using custom DETR training loop")
+
+        try:
+            train_detr(
+                model=model,
+                optimizer=optimizer,
+                criterion=criterion,
+                train_loader=train_loader,
+                val_loader=val_loader,
+                num_epochs=config.training.num_epochs,
+                device=device,
+                scheduler=scheduler,
+                callbacks=callbacks,
+                gradient_clip=config.training.gradient_clip_val,
+                window_size=config.model.prediction_window_size,
+                window_fps=config.data.fps,
+                metric_tolerances=config.training.metric_tolerances,
+                confidence_threshold=getattr(config.training, 'confidence_threshold', 0.5),
+                checkpoint_dir=config.training.checkpoint_dir,
+                log_every=config.training.log_every,
+                is_main_process=is_main_process(rank),
+                rank=rank
+            )
+
+            if is_main_process(rank):
+                print("\n" + "="*80)
+                print("Training complete!")
+                print("="*80)
+                print(f"\nCheckpoints saved to: {config.training.checkpoint_dir}")
+                print(f"Experiment: {config.experiment_name}")
+
+        finally:
+            # Cleanup distributed training
+            cleanup_distributed()
+
+    else:
+        # Use standard BoundaryTrainer for non-DETR models
+        # Determine loss output type
+        distribution_losses = ['dist_ce', 'kl_div', 'js_div', 'focal_dist_ce']
+        raw_output_losses = ['mse_raw']  # Losses that use raw logits (no sigmoid/softmax)
+
+        use_distribution_loss = config.training.loss_type in distribution_losses
+        use_raw_output = config.training.loss_type in raw_output_losses
+
+        trainer = BoundaryTrainer(
+            model=model,
+            optimizer=optimizer,
+            criterion=criterion,
+            device=device,
+            callbacks=callbacks,
+            scheduler=scheduler,
+            prediction_stride=config.data.stride,
+            prediction_window_size=config.model.prediction_window_size,
+            classification_threshold=config.training.classification_threshold,
+            use_distribution_loss=use_distribution_loss,
+            use_raw_output=use_raw_output,
+            freq_multiplier=train_dataset.freq_multiplier,  # Get from dataset
+            peak_detection_distance=config.training.peak_detection_distance,
+            iou_window_size=config.training.iou_window_size,
+            metric_tolerances=config.training.metric_tolerances,
+            train_task_ids=config.data.train_task_ids  # For cross-task evaluation tracking
+        )
+
+        # Train
+        if is_main_process(rank):
             print("\n" + "="*80)
-            print("Training complete!")
+            print("Starting training...")
             print("="*80)
 
-            # Print final statistics
-            print(f"\nFinal training loss: {history['train_loss'][-1]:.4f}")
-            if val_loader:
-                print(f"Final validation loss: {history['val_loss'][-1]:.4f}")
+        try:
+            history = trainer.fit(
+                train_loader=train_loader,
+                val_loader=val_loader,
+                num_epochs=config.training.num_epochs,
+                log_every=config.training.log_every,
+                collect_plots_every=config.training.log_plots_every
+            )
 
-            print(f"\nCheckpoints saved to: {config.training.checkpoint_dir}")
-            print(f"Experiment: {config.experiment_name}")
+            if is_main_process(rank):
+                print("\n" + "="*80)
+                print("Training complete!")
+                print("="*80)
 
-    finally:
-        # Cleanup distributed training
-        cleanup_distributed()
+                # Print final statistics
+                print(f"\nFinal training loss: {history['train_loss'][-1]:.4f}")
+                if val_loader:
+                    print(f"Final validation loss: {history['val_loss'][-1]:.4f}")
+
+                print(f"\nCheckpoints saved to: {config.training.checkpoint_dir}")
+                print(f"Experiment: {config.experiment_name}")
+
+        finally:
+            # Cleanup distributed training
+            cleanup_distributed()
 
 
 if __name__ == '__main__':
