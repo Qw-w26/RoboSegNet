@@ -2,12 +2,12 @@
 
 from .fast_droid_embeddings import (
     FastDROIDEmbedder,
-    load_fast_droid_tokenizer,
+    load_fast_droid_processor,
     create_embedding_function
 )
 
 __all__ = [
     'FastDROIDEmbedder',
-    'load_fast_droid_tokenizer',
+    'load_fast_droid_processor',
     'create_embedding_function',
 ]

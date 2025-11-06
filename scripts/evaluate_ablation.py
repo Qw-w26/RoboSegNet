@@ -130,6 +130,8 @@ def evaluate_mlp_model(
     """
     from scipy.signal import find_peaks
     from evaluation.metrics import BoundaryMetrics
+    from evaluation.f1_iou import f1_at_iou
+    from training.detr_utils import boundaries_to_segments
 
     model.eval()
 
@@ -215,8 +217,105 @@ def evaluate_mlp_model(
         boundary_metrics[f'recall@{tol}'] = recall
         boundary_metrics[f'f1@{tol}'] = f1
 
+    # Compute edit distance for boundary sequences
+    total_edit_distance = 0
+    total_sequences = 0
+
+    for i in range(len(all_predictions)):
+        # Extract boundaries from predictions (peaks)
+        pred_peaks, _ = find_peaks(all_predictions[i], height=classification_threshold, distance=1)
+        pred_frames = sorted(pred_peaks.tolist())
+
+        # Extract boundaries from targets (peaks)
+        target_peaks, _ = find_peaks(all_targets[i], height=0.5, distance=1)
+        gt_frames = sorted(target_peaks.tolist())
+
+        # Compute Levenshtein distance using dynamic programming
+        m, n = len(pred_frames), len(gt_frames)
+        dp = [[0] * (n + 1) for _ in range(m + 1)]
+
+        # Initialize base cases
+        for j in range(m + 1):
+            dp[j][0] = j
+        for k in range(n + 1):
+            dp[0][k] = k
+
+        # Fill DP table
+        for j in range(1, m + 1):
+            for k in range(1, n + 1):
+                if abs(pred_frames[j-1] - gt_frames[k-1]) <= 1.0:  # Consider same if within 1 frame
+                    dp[j][k] = dp[j-1][k-1]
+                else:
+                    dp[j][k] = 1 + min(
+                        dp[j-1][k],    # deletion
+                        dp[j][k-1],    # insertion
+                        dp[j-1][k-1]   # substitution
+                    )
+
+        total_edit_distance += dp[m][n]
+        total_sequences += 1
+
+    # Average edit distance across batch
+    edit_distance = total_edit_distance / total_sequences if total_sequences > 0 else 0.0
+
+    # Normalized edit distance (0 to 1, where 0 is perfect match)
+    max_possible_distance = sum(max(len(find_peaks(all_predictions[i], height=classification_threshold, distance=1)[0]),
+                                     len(find_peaks(all_targets[i], height=0.5, distance=1)[0]))
+                                for i in range(len(all_predictions)))
+    normalized_edit_distance = (total_edit_distance / max_possible_distance
+                                 if max_possible_distance > 0 else 0.0)
+
+    # Compute Segmental F1@IoU at standard action segmentation thresholds (10%, 25%, 50%)
+    iou_thresholds = [0.1, 0.25, 0.5]
+    window_size = all_predictions.shape[1]  # Get window size from predictions
+
+    segmental_metrics = {}
+    for iou_threshold in iou_thresholds:
+        total_tp = 0
+        total_fp = 0
+        total_fn = 0
+
+        for i in range(len(all_predictions)):
+            # Extract boundaries from predictions (peaks)
+            pred_peaks, _ = find_peaks(all_predictions[i], height=classification_threshold, distance=1)
+            pred_frames = pred_peaks.astype(float)
+
+            # Extract boundaries from targets (peaks)
+            target_peaks, _ = find_peaks(all_targets[i], height=0.5, distance=1)
+            gt_frames = target_peaks.astype(float)
+
+            # Convert boundaries to segments
+            pred_segments = boundaries_to_segments(pred_frames, window_size)
+            gt_segments = boundaries_to_segments(gt_frames, window_size)
+
+            # Compute F1@IoU for this sample
+            sample_metrics = f1_at_iou(pred_segments, gt_segments, iou_threshold)
+
+            total_tp += sample_metrics['tp']
+            total_fp += sample_metrics['fp']
+            total_fn += sample_metrics['fn']
+
+        # Compute aggregate metrics
+        seg_precision = total_tp / (total_tp + total_fp) if (total_tp + total_fp) > 0 else 0.0
+        seg_recall = total_tp / (total_tp + total_fn) if (total_tp + total_fn) > 0 else 0.0
+        seg_f1 = 2 * seg_precision * seg_recall / (seg_precision + seg_recall) if (seg_precision + seg_recall) > 0 else 0.0
+
+        # Store with clear naming to distinguish from boundary-level F1
+        iou_pct = int(iou_threshold * 100)
+        segmental_metrics[f'seg_f1@{iou_pct}'] = seg_f1
+        segmental_metrics[f'seg_precision@{iou_pct}'] = seg_precision
+        segmental_metrics[f'seg_recall@{iou_pct}'] = seg_recall
+
     # Combine metrics
-    metrics = {**frame_metrics, **boundary_metrics}
+    # Note: frame_metrics already contains 'accuracy' which is the framewise accuracy
+    metrics = {
+        **frame_metrics,
+        **boundary_metrics,
+        **segmental_metrics,
+        'edit_distance': edit_distance,
+        'normalized_edit_distance': normalized_edit_distance,
+        'framewise_accuracy': frame_metrics['accuracy']  # Alias for clarity
+    }
 
     return metrics
 

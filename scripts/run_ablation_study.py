@@ -1,21 +1,40 @@
 #!/usr/bin/env python3
-"""Run comprehensive ablation study for boundary detection models.
+"""Run comprehensive ablation study for boundary detection models using Ray Tune.
 
 This script runs ablation studies across different model architectures,
-modalities, and loss functions for all task IDs. It trains and evaluates
-each configuration on the same task data and reports F1 scores at different
-granularities.
+modalities, and loss functions for all task IDs. Each baseline trains a
+separate model per task (no multi-task training) and evaluates on that task.
 
-Ablation studies:
+Key improvements:
+- Uses Ray Tune for proper GPU resource management
+- Automatically sets CUDA_VISIBLE_DEVICES for each trial
+- Prevents GPU contention by properly allocating GPU resources
+- Supports flexible GPU allocation (e.g., 0.5 GPUs to run 2 trials per GPU)
+- ALL baselines train on single tasks independently (one model per task)
+- INCREMENTAL result saving: Results are saved and displayed after each trial completes
+
+Ablation studies (all trained per task):
 1. Pure proprioceptive (no visual features)
 2. Pure visual (no proprioceptive features)
 3. MLP + MSE loss
 4. Pure DETR (no cross attention)
 5. Cross attention + MSE loss
-6. Single task training (per task)
+6. Single task baseline (default architecture)
+
+Output metrics:
+Boundary Detection Metrics:
+- F1@1.0, F1@2.0, F1@3.0, etc. (Boundary F1 at different frame tolerances)
+- AP@1.0, AP@2.0, AP@3.0, etc. (Average Precision at different tolerances)
+- mAP (mean Average Precision)
+- Precision, Recall, Accuracy
+
+Action Segmentation Metrics (Standard):
+- Seg-F1@10%, Seg-F1@25%, Seg-F1@50% (Segmental F1 at IoU thresholds)
+- Edit-Dist (Segmental edit distance / Levenshtein distance)
+- Acc (Framewise accuracy)
 
 Usage:
-    # Run all ablations for all tasks
+    # Run all ablations for all tasks (1 GPU per trial)
     python scripts/run_ablation_study.py --base-config configs/experiments/multi_task_327_352_356_detr.yaml
 
     # Run specific ablations
@@ -24,18 +43,19 @@ Usage:
 
     # Run specific tasks only
     python scripts/run_ablation_study.py --base-config configs/experiments/multi_task_327_352_356_detr.yaml \
-        --task-ids 327 352 356
+        --task-ids 327 352
 
     # Quick test run (fewer epochs)
     python scripts/run_ablation_study.py --base-config configs/experiments/multi_task_327_352_356_detr.yaml \
-        --quick-test --num-epochs 10
+        --quick-test
 
-    # Run all ablations (parallel by default)
-    python scripts/run_ablation_study.py --base-config configs/experiments/multi_task_327_352_356_detr.yaml
-
-    # Run specific ablations with limited parallelism
+    # Limit parallelism (run 2 trials at a time)
     python scripts/run_ablation_study.py --base-config configs/experiments/multi_task_327_352_356_detr.yaml \
-        --num-parallel 2 --ablations pure_proprio pure_visual
+        --num-parallel 2
+
+    # Use 0.5 GPUs per trial (run 2 trials per GPU)
+    python scripts/run_ablation_study.py --base-config configs/experiments/multi_task_327_352_356_detr.yaml \
+        --gpus-per-trial 0.5
 
     # Connect to existing Ray cluster
     python scripts/run_ablation_study.py --base-config configs/experiments/multi_task_327_352_356_detr.yaml \
@@ -56,11 +76,75 @@ from typing import List, Dict, Any
 from datetime import datetime
 import pandas as pd
 import ray
+from ray import tune
+from ray.tune import CLIReporter
+from ray.tune.callback import Callback
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from config import load_config
+
+
+class IncrementalResultsCallback(Callback):
+    """Ray Tune callback to update results incrementally as trials complete."""
+
+    def __init__(self, ablation_study: 'AblationStudy'):
+        """Initialize callback.
+
+        Args:
+            ablation_study: Reference to AblationStudy instance
+        """
+        self.ablation_study = ablation_study
+        self.processed_trials = set()
+
+    def on_trial_complete(self, iteration: int, trials, trial, **info):
+        """Called when a trial completes.
+
+        Args:
+            iteration: Current iteration
+            trials: List of all trials
+            trial: The trial that just completed
+            **info: Additional info
+        """
+        trial_id = trial.trial_id
+        if trial_id in self.processed_trials:
+            return
+
+        # Extract trial config
+        ablation_name = trial.config.get('ablation_name')
+        task_ids = trial.config.get('task_ids', [])
+
+        if not ablation_name:
+            return
+
+        # Reconstruct experiment name
+        base_exp_name = self.ablation_study.ABLATION_CONFIGS[ablation_name]['modifications']['experiment_name']
+        exp_name = f'{base_exp_name}_{task_ids[0]}'
+
+        # Load evaluation results from filesystem
+        eval_dir = self.ablation_study.output_root / 'evaluations' / exp_name
+        results_file = eval_dir / 'evaluation_results.json'
+
+        if results_file.exists():
+            with open(results_file, 'r') as f:
+                eval_results = json.load(f)
+
+            result = {
+                'ablation': ablation_name,
+                'ablation_name': self.ablation_study.ABLATION_CONFIGS[ablation_name]['name'],
+                'description': self.ablation_study.ABLATION_CONFIGS[ablation_name]['description'],
+                'tasks': task_ids,
+                'config_path': str(self.ablation_study.output_root / 'configs' / f'{exp_name}.yaml'),
+                'checkpoint_dir': f'./checkpoints/{exp_name}',
+                'training': {'status': 'completed'},
+                'evaluation': eval_results,
+                'status': 'completed'
+            }
+
+            # Update incrementally
+            self.ablation_study._update_incremental_results(result)
+            self.processed_trials.add(trial_id)
 
 
 class AblationStudy:
@@ -118,10 +202,10 @@ class AblationStudy:
             }
         },
         'single_task': {
-            'name': 'Single Task',
-            'description': 'Train on single task only (run per task)',
+            'name': 'Single Task Baseline',
+            'description': 'Baseline with default architecture trained per task',
             'modifications': {
-                # This will be modified per task dynamically
+                # Uses default settings from base config
                 'experiment_name': 'ablation_single_task'
             }
         }
@@ -177,12 +261,13 @@ class AblationStudy:
         ablation = self.ABLATION_CONFIGS[ablation_name]
         modifications = ablation['modifications'].copy()
 
-        # Handle single task case
-        if ablation_name == 'single_task':
-            if len(task_ids) != 1:
-                raise ValueError("Single task ablation requires exactly one task ID")
-            task_id = task_ids[0]
-            modifications['experiment_name'] = f'ablation_single_task_{task_id}'
+        # All ablations now train on single tasks, so add task_id to experiment name
+        if len(task_ids) != 1:
+            raise ValueError(f"Each ablation trial must train on exactly one task ID, got {task_ids}")
+
+        task_id = task_ids[0]
+        base_exp_name = modifications['experiment_name']
+        modifications['experiment_name'] = f'{base_exp_name}_{task_id}'
 
         # Set unique checkpoint directory for this ablation
         exp_name = modifications['experiment_name']
@@ -397,19 +482,40 @@ class AblationStudy:
 
         return result
 
-    def generate_summary_report(self):
-        """Generate summary report of all results."""
-        print(f"\n{'='*80}")
-        print(f"ABLATION STUDY SUMMARY")
-        print(f"{'='*80}\n")
+    def _update_incremental_results(self, new_result: Dict[str, Any]):
+        """Update results incrementally after each trial completion.
 
-        # Save results to JSON
+        Args:
+            new_result: Result dictionary from completed trial
+        """
+        # Add to results list
+        self.results.append(new_result)
+
+        # Save detailed results to JSON immediately
         results_file = self.output_root / 'ablation_results.json'
         with open(results_file, 'w') as f:
             json.dump(self.results, f, indent=2)
-        print(f"Saved detailed results to: {results_file}")
 
-        # Create summary table
+        # Update summary CSV
+        self._update_summary_csv()
+
+        # Print progress
+        print(f"\n{'='*80}")
+        print(f"INCREMENTAL UPDATE: {len(self.results)} experiments completed")
+        print(f"{'='*80}")
+        print(f"Latest: {new_result['ablation_name']} on tasks {new_result['tasks']}")
+        if 'evaluation' in new_result and new_result['evaluation']:
+            for task_key, metrics in new_result['evaluation'].items():
+                if isinstance(metrics, dict) and 'status' not in metrics:
+                    print(f"\n{task_key} metrics:")
+                    # Print key metrics
+                    for metric_name in ['f1@2.0', 'seg_f1@50', 'framewise_accuracy', 'edit_distance']:
+                        if metric_name in metrics:
+                            print(f"  {metric_name}: {metrics[metric_name]:.4f}")
+        print(f"{'='*80}\n")
+
+    def _update_summary_csv(self):
+        """Update the summary CSV file with current results."""
         summary_rows = []
         for result in self.results:
             if 'evaluation' in result and result['evaluation']:
@@ -426,7 +532,7 @@ class AblationStudy:
                         }
 
                         # Add metrics if available
-                        # Extract F1 scores at different tolerances
+                        # Extract boundary-level F1 scores at different tolerances
                         for tol in [1.0, 2.0, 3.0, 4.0, 5.0]:
                             f1_key = f'f1@{tol}'
                             if f1_key in task_eval:
@@ -442,6 +548,22 @@ class AblationStudy:
                         if 'map' in task_eval:
                             row['mAP'] = task_eval['map']
 
+                        # Add segmental F1@IoU scores (standard action segmentation metrics)
+                        for iou_pct in [10, 25, 50]:
+                            seg_f1_key = f'seg_f1@{iou_pct}'
+                            if seg_f1_key in task_eval:
+                                row[f'Seg-F1@{iou_pct}%'] = task_eval[seg_f1_key]
+
+                        # Add edit distance metrics
+                        if 'edit_distance' in task_eval:
+                            row['Edit-Dist'] = task_eval['edit_distance']
+                        if 'normalized_edit_distance' in task_eval:
+                            row['Norm-Edit-Dist'] = task_eval['normalized_edit_distance']
+
+                        # Add framewise accuracy (Acc)
+                        if 'framewise_accuracy' in task_eval:
+                            row['Acc'] = task_eval['framewise_accuracy']
+
                         # Also add frame-level metrics
                         for metric_name in ['precision', 'recall', 'f1_score', 'accuracy']:
                             if metric_name in task_eval:
@@ -455,11 +577,29 @@ class AblationStudy:
             # Save to CSV
             csv_file = self.output_root / 'ablation_summary.csv'
             df.to_csv(csv_file, index=False)
-            print(f"Saved summary CSV to: {csv_file}")
 
-            # Print summary table
-            print("\nResults Summary:")
+    def generate_summary_report(self):
+        """Generate final summary report of all results."""
+        print(f"\n{'='*80}")
+        print(f"ABLATION STUDY FINAL SUMMARY")
+        print(f"{'='*80}\n")
+
+        # Save results to JSON
+        results_file = self.output_root / 'ablation_results.json'
+        with open(results_file, 'w') as f:
+            json.dump(self.results, f, indent=2)
+        print(f"Saved detailed results to: {results_file}")
+
+        # Update summary CSV one final time
+        self._update_summary_csv()
+
+        # Load and display final summary
+        csv_file = self.output_root / 'ablation_summary.csv'
+        if csv_file.exists():
+            df = pd.read_csv(csv_file)
+            print(f"\nFinal Results Summary ({len(df)} experiments):")
             print(df.to_string(index=False))
+            print(f"\nSummary CSV: {csv_file}")
 
         print(f"\n{'='*80}")
         print(f"Ablation study complete!")
@@ -470,26 +610,38 @@ class AblationStudy:
         self,
         task_ids: List[int],
         ablation_names: List[str] = None,
-        num_parallel: int = None
+        num_parallel: int = None,
+        gpus_per_trial: float = 1.0
     ):
-        """Run all ablation studies in parallel using Ray.
+        """Run all ablation studies in parallel using Ray Tune.
+
+        Ray Tune properly manages GPU allocation and sets CUDA_VISIBLE_DEVICES
+        for each trial, preventing GPU contention.
+
+        Results are updated INCREMENTALLY as each trial completes:
+        - ablation_results.json is updated after each trial
+        - ablation_summary.csv is updated after each trial
+        - Key metrics are printed to console after each trial
+        This allows monitoring progress even if the run is interrupted.
 
         Args:
             task_ids: Task IDs to run on
             ablation_names: List of ablation names (None = all)
-            num_parallel: Number of parallel jobs (None = all at once)
+            num_parallel: Number of parallel jobs (None = unlimited)
+            gpus_per_trial: Number of GPUs per trial (default: 1.0)
         """
         if ablation_names is None:
             ablation_names = list(self.ABLATION_CONFIGS.keys())
 
         print(f"\n{'='*80}")
-        print(f"RUNNING ABLATION STUDY")
+        print(f"RUNNING ABLATION STUDY WITH RAY TUNE")
         print(f"{'='*80}")
         print(f"Base config: {self.base_config_path}")
         print(f"Task IDs: {task_ids}")
         print(f"Ablations: {ablation_names}")
         print(f"Output root: {self.output_root}")
         print(f"Quick test: {self.quick_test}")
+        print(f"GPUs per trial: {gpus_per_trial}")
 
         # Get available GPUs
         try:
@@ -499,90 +651,143 @@ class AblationStudy:
         except:
             num_gpus = 0
 
-        print(f"Max parallel jobs: {num_parallel if num_parallel else num_gpus if num_gpus > 0 else 'unlimited'}")
+        print(f"Max parallel jobs: {num_parallel if num_parallel else 'unlimited'}")
         print(f"{'='*80}\n")
 
-        # Prepare ablation jobs
-        jobs = []
+        # Prepare trial configurations
+        # Store current working directory for Ray workers
+        working_dir = os.getcwd()
+
+        trial_configs = []
         for ablation_name in ablation_names:
-            # For single_task ablation, create one job per task
-            if ablation_name == 'single_task':
-                for task_id in task_ids:
-                    jobs.append((ablation_name, [task_id]))
-            else:
-                jobs.append((ablation_name, task_ids))
+            # Create one trial per task for ALL ablations (not multi-task training)
+            for task_id in task_ids:
+                trial_configs.append({
+                    'ablation_name': ablation_name,
+                    'task_ids': [task_id],
+                    'base_config_path': self.base_config_path,
+                    'output_root': str(self.output_root),
+                    'quick_test': self.quick_test,
+                    'working_dir': working_dir
+                })
 
-        print(f"Total jobs to run: {len(jobs)}")
+        print(f"Total trials to run: {len(trial_configs)}")
 
-        # Run jobs in parallel using Ray
-        if num_parallel is None or num_parallel >= len(jobs):
-            # Run all jobs in parallel
-            print(f"Running all {len(jobs)} jobs in parallel...")
-            futures = [
-                run_ablation_remote.remote(
-                    base_config_path=self.base_config_path,
-                    output_root=str(self.output_root),
-                    quick_test=self.quick_test,
-                    ablation_name=ablation_name,
-                    task_ids=job_task_ids
-                )
-                for ablation_name, job_task_ids in jobs
-            ]
-            results = ray.get(futures)
-        else:
-            # Run in batches
-            print(f"Running jobs in batches of {num_parallel}...")
-            results = []
-            for i in range(0, len(jobs), num_parallel):
-                batch = jobs[i:i + num_parallel]
-                print(f"\nBatch {i//num_parallel + 1}/{(len(jobs) + num_parallel - 1)//num_parallel}: Running {len(batch)} jobs...")
+        # Configure progress reporter
+        reporter = CLIReporter(
+            max_progress_rows=len(trial_configs) + 5,
+            metric_columns=["status", "ablation"]
+        )
 
-                futures = [
-                    run_ablation_remote.remote(
-                        base_config_path=self.base_config_path,
-                        output_root=str(self.output_root),
-                        quick_test=self.quick_test,
-                        ablation_name=ablation_name,
-                        task_ids=job_task_ids
-                    )
-                    for ablation_name, job_task_ids in batch
-                ]
-                batch_results = ray.get(futures)
-                results.extend(batch_results)
+        # Create callback for incremental updates
+        incremental_callback = IncrementalResultsCallback(self)
 
-        # Collect results
-        for result in results:
-            if result is not None:
-                self.results.append(result)
-                ablation_name = result.get('ablation', 'unknown')
-                print(f"\n✓ Completed: {ablation_name}")
+        # Run trials with Ray Tune
+        storage_path = str(Path(working_dir) / self.output_root)
+        print(f"Storage path: {storage_path}\n")
 
-        # Generate summary report
+        analysis = tune.run(
+            run_ablation_trainable,
+            config=tune.grid_search(trial_configs),
+            resources_per_trial={"cpu": 1, "gpu": gpus_per_trial},
+            max_concurrent_trials=num_parallel,
+            verbose=1,
+            progress_reporter=reporter,
+            storage_path=storage_path,
+            name="ablation_study",
+            log_to_file=True,
+            raise_on_failed_trial=False,  # Don't stop if one trial fails
+            callbacks=[incremental_callback]  # Add incremental results callback
+        )
+
+        # Most results have been collected incrementally by the callback
+        # Just do a final check for any trials that might have been missed
+        print(f"\n{'='*80}")
+        print(f"FINALIZING RESULTS")
+        print(f"{'='*80}\n")
+
+        processed_trial_ids = incremental_callback.processed_trials
+
+        for trial in analysis.trials:
+            trial_id = trial.trial_id
+            if trial_id in processed_trial_ids:
+                continue
+
+            if trial.status == "TERMINATED":
+                # Trial completed but wasn't caught by callback
+                ablation_name = trial.config['ablation_name']
+                task_ids = trial.config['task_ids']
+
+                # Reconstruct experiment name
+                base_exp_name = self.ABLATION_CONFIGS[ablation_name]['modifications']['experiment_name']
+                exp_name = f'{base_exp_name}_{task_ids[0]}'
+
+                # Load evaluation results
+                eval_dir = self.output_root / 'evaluations' / exp_name
+                results_file = eval_dir / 'evaluation_results.json'
+
+                if results_file.exists():
+                    with open(results_file, 'r') as f:
+                        eval_results = json.load(f)
+
+                    result = {
+                        'ablation': ablation_name,
+                        'ablation_name': self.ABLATION_CONFIGS[ablation_name]['name'],
+                        'description': self.ABLATION_CONFIGS[ablation_name]['description'],
+                        'tasks': task_ids,
+                        'config_path': str(self.output_root / 'configs' / f'{exp_name}.yaml'),
+                        'checkpoint_dir': f'./checkpoints/{exp_name}',
+                        'training': {'status': 'completed'},
+                        'evaluation': eval_results,
+                        'status': 'completed'
+                    }
+
+                    # Update incrementally
+                    self._update_incremental_results(result)
+                    print(f"✓ Completed (late): {result['ablation_name']} on tasks {task_ids}")
+                else:
+                    print(f"✗ Missing results: {exp_name}")
+            elif trial.status == "ERROR":
+                ablation_name = trial.config.get('ablation_name', 'unknown')
+                print(f"✗ Failed: {ablation_name} - status: ERROR")
+
+        # Generate final summary report
         self.generate_summary_report()
 
 
-@ray.remote(num_gpus=0.5)
-def run_ablation_remote(
-    base_config_path: str,
-    output_root: str,
-    quick_test: bool,
-    ablation_name: str,
-    task_ids: List[int]
-) -> Dict[str, Any]:
-    """Ray remote function to run a single ablation study.
+def run_ablation_trainable(config: Dict[str, Any]):
+    """Ray Tune trainable function for running a single ablation study.
 
-    Requires 1 GPU per task for training and evaluation.
+    Ray Tune automatically sets CUDA_VISIBLE_DEVICES based on allocated GPUs,
+    so subprocesses will use the correct GPU without contention.
 
     Args:
-        base_config_path: Path to base configuration
-        output_root: Root directory for results
-        quick_test: Whether to run quick test
-        ablation_name: Name of ablation to run
-        task_ids: Task IDs to use
-
-    Returns:
-        Results dictionary
+        config: Dictionary containing:
+            - ablation_name: Name of ablation to run
+            - task_ids: Task IDs to use
+            - base_config_path: Path to base configuration
+            - output_root: Root directory for results
+            - quick_test: Whether to run quick test
+            - working_dir: Working directory to change to
     """
+    ablation_name = config['ablation_name']
+    task_ids = config['task_ids']
+    base_config_path = config['base_config_path']
+    output_root = config['output_root']
+    quick_test = config['quick_test']
+    working_dir = config['working_dir']
+
+    # Change to the correct working directory (Ray workers may start in different dir)
+    original_dir = os.getcwd()
+    os.chdir(working_dir)
+
+    print(f"\n{'='*80}")
+    print(f"Running ablation: {ablation_name}")
+    print(f"Task IDs: {task_ids}")
+    print(f"Working directory: {os.getcwd()}")
+    print(f"Allocated GPUs (CUDA_VISIBLE_DEVICES): {os.environ.get('CUDA_VISIBLE_DEVICES', 'not set')}")
+    print(f"{'='*80}\n")
+
     try:
         # Create ablation study instance
         study = AblationStudy(
@@ -599,19 +804,20 @@ def run_ablation_remote(
             run_evaluation=True
         )
 
-        return result
+        # Ray Tune will automatically mark the trial as completed when function returns
+        # Results are collected from filesystem by main process
+        print(f"\n✓ Completed ablation: {ablation_name}")
 
     except Exception as e:
         print(f"\n✗ Failed: {ablation_name} with tasks {task_ids}")
         print(f"Error: {e}")
         import traceback
         traceback.print_exc()
-        return {
-            'ablation': ablation_name,
-            'tasks': task_ids,
-            'status': 'failed',
-            'error': str(e)
-        }
+        # Re-raise to mark trial as failed
+        raise
+    finally:
+        # Restore original directory
+        os.chdir(original_dir)
 
 
 def parse_args() -> argparse.Namespace:
@@ -677,6 +883,13 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument(
+        '--gpus-per-trial',
+        type=float,
+        default=0.1,
+        help='Number of GPUs per trial (default: 1.0, use 0.5 to run 2 trials per GPU)'
+    )
+
+    parser.add_argument(
         '--ray-address',
         type=str,
         default=None,
@@ -722,11 +935,12 @@ def main():
         if 'all' in ablation_names:
             ablation_names = list(AblationStudy.ABLATION_CONFIGS.keys())
 
-        # Run ablations in parallel
+        # Run ablations in parallel with Ray Tune
         study.run_all_ablations(
             task_ids=task_ids,
             ablation_names=ablation_names,
-            num_parallel=args.num_parallel
+            num_parallel=args.num_parallel,
+            gpus_per_trial=args.gpus_per_trial
         )
 
     finally:

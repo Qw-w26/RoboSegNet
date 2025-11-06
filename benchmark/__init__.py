@@ -27,7 +27,7 @@ from benchmark.metrics import (
 from benchmark.benchmark_runner import BenchmarkRunner
 from embedding import (
     FastDROIDEmbedder,
-    load_fast_droid_tokenizer,
+    load_fast_droid_processor,
     create_embedding_function
 )
 
@@ -55,6 +55,6 @@ __all__ = [
     'BenchmarkRunner',
     # Embeddings
     'FastDROIDEmbedder',
-    'load_fast_droid_tokenizer',
+    'load_fast_droid_processor',
     'create_embedding_function',
 ]

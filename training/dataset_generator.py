@@ -368,20 +368,18 @@ class SegmentBoundaryDataset(torch.utils.data.Dataset):
         # Extract window features
         window = sample['window']
 
-        # Tokenize actions
+        # Tokenize actions using FAST processor (DCT compression)
         if len(window) > 1:
-            actions = np.diff(window, axis=0)
-            action_str = " ".join([f"{x:.4f}" for x in actions.flatten()])
-            tokens = self.embedder.tokenizer(action_str, truncation=False, return_tensors='np')
-            token_ids = tokens['input_ids'].flatten()
+            actions = np.diff(window, axis=0)  # Compute action deltas
+            token_ids = self.embedder.tokenize_actions(actions)  # Use FAST processor
 
-            # Pad/truncate
+            # Pad/truncate to fixed length
             if len(token_ids) < self.max_token_length:
-                pad_id = self.embedder.tokenizer.pad_token_id or 0
+                # Pad with zeros (FAST doesn't have a special pad token)
                 token_embedding = np.pad(
                     token_ids,
                     (0, self.max_token_length - len(token_ids)),
-                    constant_values=pad_id
+                    constant_values=0
                 )
             else:
                 token_embedding = token_ids[:self.max_token_length]

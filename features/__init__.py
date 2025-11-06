@@ -2,7 +2,7 @@
 
 from .dino_extractor import DinoFeatureExtractor, RayDinoFeatureExtractor
 from .droid_extractor import DroidTokenEmbedder, FastTokenizerConfig
-from .fast_droid_embeddings import FastDROIDEmbedder
+from embedding.fast_droid_embeddings import FastDROIDEmbedder
 
 __all__ = [
     'DinoFeatureExtractor',

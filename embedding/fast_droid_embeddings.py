@@ -2,9 +2,12 @@
 Fast-DROID + DINOv3 embedding module for trajectory representation.
 
 This module provides embedding functionality using:
-- Fast-DROID tokenizer for action sequences
+- Fast-DROID processor for action sequences (using DCT compression)
 - DINOv3 for visual features (when videos available)
 - End effector poses directly from H5 files
+
+IMPORTANT: FAST uses AutoProcessor (not AutoTokenizer) and expects
+numpy arrays [time_horizon, action_dim], not strings!
 """
 
 import numpy as np
@@ -12,7 +15,7 @@ import torch
 from pathlib import Path
 from typing import Optional, List, Tuple
 from tqdm import tqdm
-from transformers import AutoTokenizer, AutoModel, AutoProcessor
+from transformers import AutoProcessor, AutoModel
 import h5py
 
 try:
@@ -26,14 +29,17 @@ except ImportError:
 
 class FastDROIDEmbedder:
     """
-    Embedding generator using Fast-DROID tokenizer and DINOv3 features.
+    Embedding generator using Fast-DROID processor and DINOv3 features.
 
     This class handles:
     - Loading end effector poses from H5 files
     - Creating sliding windows
-    - Tokenizing action sequences with Fast-DROID
+    - Tokenizing action sequences with Fast-DROID (using DCT compression)
     - Extracting visual features with DINOv3 (optional)
     - Combining all features into embeddings
+
+    NOTE: FAST processor expects numpy arrays [time_horizon, action_dim]
+    normalized to [-1, 1] range, NOT string representations!
     """
 
     def __init__(
@@ -42,7 +48,8 @@ class FastDROIDEmbedder:
         stride: int = 1,
         use_dino: bool = True,
         max_token_length: Optional[int] = None,
-        device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
+        device: str = 'cuda' if torch.cuda.is_available() else 'cpu',
+        normalize_actions: bool = True
     ):
         """
         Initialize the Fast-DROID embedder.
@@ -53,15 +60,20 @@ class FastDROIDEmbedder:
             use_dino: If True, extract DINOv3 visual features
             max_token_length: Fixed maximum token length (for consistent embeddings)
             device: Device to use for DINOv3 model
+            normalize_actions: If True, normalize actions to [-1, 1] range for FAST
         """
         self.window_size = window_size
         self.stride = stride
         self.use_dino = use_dino
         self.device = device
-        self.max_token_length = max_token_length  # Fixed max token length
+        self.max_token_length = max_token_length
+        self.normalize_actions = normalize_actions
 
-        # Initialize tokenizer
-        self.tokenizer = self._load_tokenizer()
+        # Initialize FAST processor (not tokenizer!)
+        self.processor = self._load_processor()
+
+        # Track normalization statistics for consistent normalization
+        self.action_stats = None  # Will store (min, max) or (mean, std)
 
         # Initialize DINOv3 model if needed
         self.dino_model = None
@@ -69,16 +81,13 @@ class FastDROIDEmbedder:
         if use_dino and CV2_AVAILABLE:
             self._init_dino_model()
 
-    def _load_tokenizer(self):
-        """Load Fast-DROID tokenizer."""
-        tokenizer = AutoTokenizer.from_pretrained("physical-intelligence/fast")
-        tokenizer.add_special_tokens({
-            'pad_token': '[PAD]',
-            'eos_token': '[EOS]',
-            'bos_token': '[BOS]',
-            'unk_token': '[UNK]'
-        })
-        return tokenizer
+    def _load_processor(self):
+        """Load Fast-DROID processor (uses DCT compression, not character tokenization)."""
+        processor = AutoProcessor.from_pretrained(
+            "physical-intelligence/fast",
+            trust_remote_code=True
+        )
+        return processor
 
     def _init_dino_model(self):
         """Initialize DINOv3 model."""
@@ -226,13 +235,73 @@ class FastDROIDEmbedder:
                 container.close()
             raise RuntimeError(f"Error reading video {video_path} frame {frame_idx}: {str(e)}") from e
 
+    def _normalize_actions(self, actions: np.ndarray) -> np.ndarray:
+        """
+        Normalize actions to [-1, 1] range as required by FAST.
+
+        Args:
+            actions: Action array of shape (time_horizon, action_dim)
+
+        Returns:
+            Normalized actions in [-1, 1] range
+        """
+        if not self.normalize_actions:
+            return actions
+
+        # Use robust normalization with clipping
+        # Compute per-dimension statistics
+        action_min = actions.min(axis=0, keepdims=True)
+        action_max = actions.max(axis=0, keepdims=True)
+
+        # Avoid division by zero
+        action_range = action_max - action_min
+        action_range = np.where(action_range < 1e-8, 1.0, action_range)
+
+        # Normalize to [0, 1] then to [-1, 1]
+        normalized = 2 * (actions - action_min) / action_range - 1
+
+        # Clip to ensure within bounds (handle numerical errors)
+        normalized = np.clip(normalized, -1.0, 1.0)
+
+        return normalized
+
+    def tokenize_actions(self, actions: np.ndarray) -> np.ndarray:
+        """
+        Tokenize a single action sequence using FAST processor.
+
+        This is a convenience method for tokenizing individual action sequences,
+        useful for dataset generators that process samples one at a time.
+
+        Args:
+            actions: Action array of shape (time_horizon, action_dim)
+
+        Returns:
+            Token IDs as numpy array
+        """
+        # Normalize to [-1, 1] as required by FAST
+        actions_normalized = self._normalize_actions(actions)
+
+        # Add batch dimension for processor: [batch, time_horizon, action_dim]
+        actions_batch = actions_normalized[np.newaxis, ...]
+
+        # Tokenize with FAST processor (uses DCT compression)
+        token_ids = self.processor(actions_batch)
+
+        # Extract tokens (remove batch dimension)
+        if isinstance(token_ids, list) and len(token_ids) > 0:
+            tokens = np.array(token_ids[0])
+        else:
+            tokens = np.array(token_ids).flatten()
+
+        return tokens
+
     def create_embeddings(
         self,
         windows: List[Tuple[np.ndarray, int]],
         video_path: Optional[Path] = None
     ) -> np.ndarray:
         """
-        Create embeddings from windows using Fast-DROID tokenizer and DINOv3.
+        Create embeddings from windows using Fast-DROID processor and DINOv3.
 
         Args:
             windows: List of (window, center_frame_idx) tuples
@@ -254,17 +323,28 @@ class FastDROIDEmbedder:
         for window, _ in tqdm(windows, desc="Tokenizing windows", leave=False):
             if len(window) > 1:
                 # Compute actions (differences)
-                actions = np.diff(window, axis=0)
-                action_str = " ".join([f"{x:.4f}" for x in actions.flatten()])
+                actions = np.diff(window, axis=0)  # Shape: (time_horizon-1, action_dim)
 
-                # Tokenize
-                tokens = self.tokenizer(action_str, truncation=False, return_tensors='np')
-                token_ids = tokens['input_ids'].flatten()
-                all_tokens.append(token_ids)
+                # Normalize to [-1, 1] as required by FAST
+                actions_normalized = self._normalize_actions(actions)
+
+                # Add batch dimension for processor: [batch, time_horizon, action_dim]
+                actions_batch = actions_normalized[np.newaxis, ...]
+
+                # Tokenize with FAST processor (uses DCT compression)
+                token_ids = self.processor(actions_batch)  # Returns list of token sequences
+
+                # Extract tokens (remove batch dimension)
+                if isinstance(token_ids, list) and len(token_ids) > 0:
+                    tokens = np.array(token_ids[0])  # Get first (and only) batch item
+                else:
+                    tokens = np.array(token_ids).flatten()
+
+                all_tokens.append(tokens)
 
                 # Only compute max if not using fixed length
                 if self.max_token_length is None:
-                    max_token_length = max(max_token_length, len(token_ids))
+                    max_token_length = max(max_token_length, len(tokens))
             else:
                 all_tokens.append(np.array([]))
 
@@ -275,9 +355,9 @@ class FastDROIDEmbedder:
             if len(window) > 1 and len(tokens) > 0:
                 # Pad/truncate tokens
                 if len(tokens) < max_token_length:
-                    pad_id = self.tokenizer.pad_token_id or 0
+                    # Pad with zeros (FAST doesn't have a special pad token)
                     token_embedding = np.pad(tokens, (0, max_token_length - len(tokens)),
-                                            constant_values=pad_id)
+                                            constant_values=0)
                 else:
                     token_embedding = tokens[:max_token_length]
 
@@ -352,16 +432,18 @@ class FastDROIDEmbedder:
         return embeddings
 
 
-def load_fast_droid_tokenizer():
-    """Load the Fast-DROID tokenizer."""
-    tokenizer = AutoTokenizer.from_pretrained("KarlP/fast-droid")
-    tokenizer.add_special_tokens({
-        'pad_token': '[PAD]',
-        'eos_token': '[EOS]',
-        'bos_token': '[BOS]',
-        'unk_token': '[UNK]'
-    })
-    return tokenizer
+def load_fast_droid_processor():
+    """
+    Load the Fast-DROID processor.
+
+    NOTE: FAST uses AutoProcessor (not AutoTokenizer) and expects
+    numpy arrays, not strings!
+    """
+    processor = AutoProcessor.from_pretrained(
+        "physical-intelligence/fast",
+        trust_remote_code=True
+    )
+    return processor
 
 
 def create_embedding_function(

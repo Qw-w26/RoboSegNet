@@ -9,8 +9,8 @@ model:
 
   # Basic settings
   vocab_size: 2048
-  token_embed_dim: 192
-  num_dino_frames: 6
+  token_embed_dim: 600
+  num_dino_frames: 18
   prediction_window_size: 18
 
   # Feature modalities
@@ -41,8 +41,10 @@ model:
 data:
   # Multi-task configuration
   meta_dir: /shared/projects/agibot/full_dataset/
-  train_task_ids: [327, 352, 354, 356, 357, 358, 359, 360, 365, 366, 367, 368, 372, 374, 375, 376, 377, 378, 380, 384, 385, 389, 390]
-  eval_task_ids: [327, 352, 354, 356, 357, 358, 359, 360, 365, 366, 367, 368, 372, 374, 375, 376, 377, 378, 380, 384, 385, 389, 390]
+  # train_task_ids: [327, 352, 354, 356, 357, 358, 359, 360, 365, 366, 367, 368, 372, 374, 375, 376, 377, 378, 380, 384, 385, 389, 390]
+  # eval_task_ids: [327, 352, 354, 356, 357, 358, 359, 360, 365, 366, 367, 368, 372, 374, 375, 376, 377, 378, 380, 384, 385, 389, 390]
+  train_task_ids: [327, 352, 354, 356, 357, 358, 359, 360]
+  eval_task_ids: [327, 352, 354, 356, 357, 358, 359, 360]
   # train_task_ids: [327]
   # eval_task_ids: [327]
   cache_dir: ./cache
@@ -52,7 +54,7 @@ data:
   stride: 1
   fps: 2.0
   action_dim: 14
-  num_dino_frames: 6
+  num_dino_frames: 18
 
   # DataLoader (smaller batch size for DETR)
   batch_size: 64  # Smaller than baseline due to transformer complexity
