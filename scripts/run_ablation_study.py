@@ -606,6 +606,50 @@ class AblationStudy:
         print(f"Results directory: {self.output_root}")
         print(f"{'='*80}\n")
 
+    def _load_completed_trials(self) -> set:
+        """Load information about completed trials from previous runs.
+
+        Returns:
+            Set of (ablation_name, task_id) tuples for completed trials
+        """
+        completed_trials = set()
+
+        # Check if results file exists
+        results_file = self.output_root / 'ablation_results.json'
+        if not results_file.exists():
+            return completed_trials
+
+        try:
+            with open(results_file, 'r') as f:
+                previous_results = json.load(f)
+
+            # Extract completed trials
+            for result in previous_results:
+                if result.get('status') == 'completed':
+                    ablation_name = result.get('ablation')
+                    tasks = result.get('tasks', [])
+                    if ablation_name and tasks:
+                        # For single-task experiments, tasks should have exactly one element
+                        for task_id in tasks:
+                            completed_trials.add((ablation_name, task_id))
+
+            # Also load into self.results for incremental updates
+            self.results = previous_results
+
+            if completed_trials:
+                print(f"\n{'='*80}")
+                print(f"FOUND {len(completed_trials)} COMPLETED TRIALS FROM PREVIOUS RUN")
+                print(f"{'='*80}")
+                for ablation_name, task_id in sorted(completed_trials):
+                    ablation_display = self.ABLATION_CONFIGS.get(ablation_name, {}).get('name', ablation_name)
+                    print(f"  ✓ {ablation_display} - Task {task_id}")
+                print(f"{'='*80}\n")
+
+        except Exception as e:
+            print(f"Warning: Could not load previous results: {e}")
+
+        return completed_trials
+
     def run_all_ablations(
         self,
         task_ids: List[int],
@@ -654,14 +698,23 @@ class AblationStudy:
         print(f"Max parallel jobs: {num_parallel if num_parallel else 'unlimited'}")
         print(f"{'='*80}\n")
 
+        # Load completed trials from previous runs
+        completed_trials = self._load_completed_trials()
+
         # Prepare trial configurations
         # Store current working directory for Ray workers
         working_dir = os.getcwd()
 
         trial_configs = []
+        skipped_trials = []
         for ablation_name in ablation_names:
             # Create one trial per task for ALL ablations (not multi-task training)
             for task_id in task_ids:
+                # Check if this trial was already completed
+                if (ablation_name, task_id) in completed_trials:
+                    skipped_trials.append((ablation_name, task_id))
+                    continue
+
                 trial_configs.append({
                     'ablation_name': ablation_name,
                     'task_ids': [task_id],
@@ -671,7 +724,24 @@ class AblationStudy:
                     'working_dir': working_dir
                 })
 
+        if skipped_trials:
+            print(f"\n{'='*80}")
+            print(f"SKIPPING {len(skipped_trials)} ALREADY COMPLETED TRIALS")
+            print(f"{'='*80}")
+            for ablation_name, task_id in skipped_trials[:10]:  # Show first 10
+                ablation_display = self.ABLATION_CONFIGS.get(ablation_name, {}).get('name', ablation_name)
+                print(f"  ⊘ {ablation_display} - Task {task_id}")
+            if len(skipped_trials) > 10:
+                print(f"  ... and {len(skipped_trials) - 10} more")
+            print(f"{'='*80}\n")
+
         print(f"Total trials to run: {len(trial_configs)}")
+
+        # If no trials to run, just generate the summary and exit
+        if len(trial_configs) == 0:
+            print("\n⚠ All trials already completed! Generating summary report...")
+            self.generate_summary_report()
+            return
 
         # Configure progress reporter
         reporter = CLIReporter(

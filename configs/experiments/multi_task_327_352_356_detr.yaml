@@ -19,11 +19,11 @@ model:
 
   # Visual encoder settings
   visual_hidden_dim: 256
-  visual_dropout: 0.3
+  visual_dropout: 0.109  # Tuned: 0.108969 (from best trial)
 
   # Cross-modal attention settings
   cross_modal_dim: 512
-  attention_dropout: 0.1
+  attention_dropout: 0.113  # Tuned: 0.112917 (from best trial)
   num_attention_heads: 8
 
   # DETR-specific settings
@@ -31,7 +31,7 @@ model:
   num_encoder_layers: 6
   num_decoder_layers: 6
   num_boundary_queries: 9  # Max 9 boundaries in 18-frame window
-  detr_dropout: 0.1
+  detr_dropout: 0.113  # Tuned: 0.112982 (from best trial)
   detr_feedforward_dim: 2048
 
   # Legacy settings (for TinyFASTEncoder)
@@ -56,8 +56,8 @@ data:
   action_dim: 14
   num_dino_frames: 18
 
-  # DataLoader (smaller batch size for DETR)
-  batch_size: 64  # Smaller than baseline due to transformer complexity
+  # DataLoader (optimized batch size with gradient accumulation)
+  batch_size: 128  # Increased from 64 (using gradient accumulation for effective batch size of 512)
   num_workers: 16
   pin_memory: true
 
@@ -74,33 +74,33 @@ data:
 training:
   num_epochs: 200  # DETR typically needs more epochs
 
-  # Learning rate (lower for DETR stability)
-  learning_rate: 0.0001  # Start conservative (1e-4)
-  weight_decay: 0.0001
+  # Learning rate (tuned via hyperparameter search)
+  learning_rate: 0.0000506  # Tuned: 5.06351e-05 (from best trial)
+  weight_decay: 0.000471  # Tuned: 0.000470546 (from best trial)
   optimizer: adamw  # AdamW recommended for transformers
 
-  # Warmup (critical for DETR)
-  warmup_steps: 2000  # 2000 steps warmup
+  # Warmup (tuned - shorter warmup performs better)
+  warmup_steps: 500  # Tuned: 500 (from best trial, was 2000)
   warmup_start_lr: 0.0000001  # 1e-7
 
   # Scheduler
   scheduler: cosine
   min_lr: 0.000001  # 1e-6
 
-  # DETR Loss settings
+  # DETR Loss settings (tuned via hyperparameter search)
   loss_type: "set_criterion"  # Use Hungarian matching loss
-  loss_position_weight: 5.0  # Weight for position L1 loss
-  loss_confidence_weight: 2.0  # Weight for confidence BCE loss
-  loss_eos_coef: 0.1  # Relative weight for "no boundary" class (lower = upweight positives)
+  loss_position_weight: 4.41  # Tuned: 4.41297 (from best trial)
+  loss_confidence_weight: 1.40  # Tuned: 1.40385 (from best trial)
+  loss_eos_coef: 0.140  # Tuned: 0.139736 (from best trial, higher = less upweighting)
 
   # Optional: Use focal loss for confidence (helps with class imbalance)
   use_focal_loss: false
   loss_focal_alpha: 0.25  # Only used if use_focal_loss=true
   loss_focal_gamma: 2.0
 
-  # Hungarian matcher costs (for matching, not final loss)
-  matcher_cost_position: 5.0
-  matcher_cost_confidence: 2.0
+  # Hungarian matcher costs (tuned via hyperparameter search)
+  matcher_cost_position: 4.10  # Tuned: 4.10266 (from best trial)
+  matcher_cost_confidence: 4.65  # Tuned: 4.64562 (from best trial)
 
   # Metrics (for evaluation)
   confidence_threshold: 0.5  # Threshold for filtering predictions
@@ -109,9 +109,10 @@ training:
   # mAP computation settings
   confidence_thresholds_for_map: [0.3, 0.4, 0.5]
 
-  # Regularization (CRITICAL for DETR stability)
-  gradient_clip_val: 0.1  # Aggressive clipping for DETR
+  # Regularization (tuned via hyperparameter search)
+  gradient_clip_val: 0.053  # Tuned: 0.0532533 (from best trial, gentler clipping)
   gradient_clip_type: "norm"  # Clip by global norm
+  gradient_accumulation_steps: 4  # Accumulate gradients over 4 steps (effective batch size = 128 * 4 = 512)
   use_amp: true  # Mixed precision for efficiency
 
   # Checkpointing
@@ -122,7 +123,7 @@ training:
 
   # Early stopping
   early_stopping: true
-  patience: 20  # More patience for DETR
+  patience: 10 
 
   # Logging
   log_every: 10

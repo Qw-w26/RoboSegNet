@@ -523,6 +523,7 @@ def main():
                 scheduler=scheduler,
                 callbacks=callbacks,
                 gradient_clip=config.training.gradient_clip_val,
+                gradient_accumulation_steps=getattr(config.training, 'gradient_accumulation_steps', 1),
                 window_size=config.model.prediction_window_size,
                 window_fps=config.data.fps,
                 metric_tolerances=config.training.metric_tolerances,

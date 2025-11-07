@@ -173,7 +173,8 @@ def compute_detr_metrics(
     window_size: int,
     confidence_threshold: float = 0.5,
     tolerances: List[float] = None,
-    confidence_thresholds_for_map: List[float] = None
+    confidence_thresholds_for_map: List[float] = None,
+    compute_map: bool = True
 ) -> Dict[str, float]:
     """Compute evaluation metrics for DETR predictions at multiple tolerances.
 
@@ -184,9 +185,10 @@ def compute_detr_metrics(
         confidence_threshold: Minimum confidence to count as detection
         tolerances: List of matching tolerances in frames
         confidence_thresholds_for_map: List of confidence thresholds for mAP calculation
+        compute_map: Whether to compute mAP (expensive, disable during training for speed)
 
     Returns:
-        Dictionary with precision, recall, F1 at each tolerance, counts, and mAP
+        Dictionary with precision, recall, F1 at each tolerance, counts, and optionally mAP
     """
     if tolerances is None:
         tolerances = [2.0]
@@ -260,6 +262,10 @@ def compute_detr_metrics(
     results['precision'] = results[f'precision@{first_tol}']
     results['recall'] = results[f'recall@{first_tol}']
     results['f1'] = results[f'f1@{first_tol}']
+
+    # Skip expensive mAP computation during training for speed
+    if not compute_map:
+        return results
 
     # Compute mAP (mean Average Precision) across tolerances and confidence thresholds
     ap_per_tolerance = {}

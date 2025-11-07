@@ -1,20 +1,37 @@
 #!/usr/bin/env python3
-"""Hyperparameter tuning script using Ray Tune for boundary prediction models.
+"""Hyperparameter tuning script for DETR-based boundary detection models.
 
-This script enables parallel hyperparameter search across multiple configurations.
-It's based on train.py but adapted for Ray Tune's distributed optimization.
+This script enables parallel hyperparameter search specifically optimized for DETR
+architecture with Hungarian matching and set-based supervision. It uses Ray Tune
+for distributed optimization.
+
+Key DETR-specific parameters tuned:
+    - Loss weights (position, confidence) and EOS coefficient
+    - Hungarian matcher costs
+    - Warmup steps and gradient clipping
+    - DETR dropout rates
+    - Architecture capacity (queries, layers, d_model)
 
 Example usage:
-    # Basic tuning with default search space
-    python scripts/tune.py --config configs/experiments/multi_task_327_352_356.yaml
+    # Standard search (Tier 1+2+3: losses + optimization + dropout)
+    python scripts/tune.py --config configs/experiments/multi_task_327_352_356_detr.yaml \
+        --num-trials 20 --tier standard
 
-    # With custom number of trials and GPUs
-    python scripts/tune.py --config configs/experiments/multi_task_327_352_356.yaml \
-        --num-trials 20 --gpus-per-trial 0.5
+    # Essential only (Tier 1+2: losses + optimization, fastest)
+    python scripts/tune.py --config configs/experiments/multi_task_327_352_356_detr.yaml \
+        --num-trials 10 --tier essential
 
-    # With specific search algorithm
-    python scripts/tune.py --config configs/experiments/multi_task_327_352_356.yaml \
-        --search-alg hyperopt --scheduler asha
+    # Full search (Tier 1+2+3+4: includes architecture)
+    python scripts/tune.py --config configs/experiments/multi_task_327_352_356_detr.yaml \
+        --num-trials 50 --tier full --gpus-per-trial 0.5
+
+    # Experimental (Tier 1-5: includes focal loss exploration)
+    python scripts/tune.py --config configs/experiments/multi_task_327_352_356_detr.yaml \
+        --num-trials 100 --tier experimental
+
+    # With specific search algorithm and scheduler
+    python scripts/tune.py --config configs/experiments/multi_task_327_352_356_detr.yaml \
+        --num-trials 30 --search-alg hyperopt --scheduler asha --tier standard
 
 Author: Claude Code
 Date: January 2025
@@ -85,27 +102,51 @@ def train_boundary_model(config_dict: Dict[str, Any],
         config_dir = Path(base_config_path).parent.parent.parent
         base_config.training.checkpoint_dir = str((config_dir / base_config.training.checkpoint_dir).resolve())
 
-    # Override with hyperparameters from Ray Tune
+    # Override with hyperparameters from Ray Tune (DETR-specific)
     base_config.training.learning_rate = config_dict['learning_rate']
-    base_config.training.classification_threshold = config_dict['classification_threshold']
-    base_config.training.weight_decay = config_dict.get('weight_decay', base_config.training.weight_decay)
-    base_config.data.batch_size = config_dict.get('batch_size', base_config.data.batch_size)
+    base_config.training.weight_decay = config_dict['weight_decay']
+    base_config.data.batch_size = config_dict['batch_size']
 
-    # Update loss parameters if tuning them
-    if 'loss_pos_weight' in config_dict:
-        base_config.training.loss_pos_weight = config_dict['loss_pos_weight']
-    if 'loss_alpha' in config_dict:
-        base_config.training.loss_alpha = config_dict['loss_alpha']
-    if 'loss_gamma' in config_dict:
-        base_config.training.loss_gamma = config_dict['loss_gamma']
+    # Tier 1: Loss weights and Hungarian matcher (MOST CRITICAL)
+    base_config.training.loss_position_weight = config_dict['loss_position_weight']
+    base_config.training.loss_confidence_weight = config_dict['loss_confidence_weight']
+    base_config.training.loss_eos_coef = config_dict['loss_eos_coef']
+    base_config.training.matcher_cost_position = config_dict.get('matcher_cost_position', getattr(base_config.training, 'matcher_cost_position', 5.0))
+    base_config.training.matcher_cost_confidence = config_dict.get('matcher_cost_confidence', getattr(base_config.training, 'matcher_cost_confidence', 2.0))
 
-    # Update model parameters if tuning them
-    if 'transformer_dropout' in config_dict:
-        base_config.model.transformer_dropout = config_dict['transformer_dropout']
-    if 'mlp_dropout' in config_dict:
-        base_config.model.mlp_dropout = config_dict['mlp_dropout']
-    if 'feature_noise_std' in config_dict:
-        base_config.model.feature_noise_std = config_dict['feature_noise_std']
+    # Tier 2: Optimization (training stability)
+    if 'warmup_steps' in config_dict:
+        base_config.training.warmup_steps = config_dict['warmup_steps']
+    if 'gradient_clip_val' in config_dict:
+        base_config.training.gradient_clip_val = config_dict['gradient_clip_val']
+
+    # Tier 3: Regularization (dropout)
+    if 'detr_dropout' in config_dict:
+        base_config.model.detr_dropout = config_dict['detr_dropout']
+    if 'attention_dropout' in config_dict:
+        base_config.model.attention_dropout = config_dict['attention_dropout']
+    if 'visual_dropout' in config_dict:
+        base_config.model.visual_dropout = config_dict['visual_dropout']
+
+    # Tier 4: Architecture (model capacity - optional for advanced tuning)
+    if 'num_boundary_queries' in config_dict:
+        base_config.model.num_boundary_queries = config_dict['num_boundary_queries']
+    if 'num_encoder_layers' in config_dict:
+        base_config.model.num_encoder_layers = config_dict['num_encoder_layers']
+    if 'num_decoder_layers' in config_dict:
+        base_config.model.num_decoder_layers = config_dict['num_decoder_layers']
+    if 'd_model' in config_dict:
+        base_config.model.d_model = config_dict['d_model']
+    if 'detr_feedforward_dim' in config_dict:
+        base_config.model.detr_feedforward_dim = config_dict['detr_feedforward_dim']
+
+    # Tier 5: Focal loss (optional - if use_focal_loss is True)
+    if 'use_focal_loss' in config_dict:
+        base_config.training.use_focal_loss = config_dict['use_focal_loss']
+    if 'loss_focal_alpha' in config_dict:
+        base_config.training.loss_focal_alpha = config_dict['loss_focal_alpha']
+    if 'loss_focal_gamma' in config_dict:
+        base_config.training.loss_focal_gamma = config_dict['loss_focal_gamma']
 
     # Disable WandB for individual trials (we'll log aggregate results)
     base_config.wandb.enabled = False
@@ -156,45 +197,58 @@ def train_boundary_model(config_dict: Dict[str, Any],
     collate_fn = collate_detr_batch if is_detr else collate_dict
 
     # Create data loaders
+    # IMPORTANT: Use num_workers=0 for Ray Tune to avoid nested multiprocessing deadlocks
+    # Ray already handles parallelism across trials
     train_loader = DataLoader(
         train_dataset,
         batch_size=base_config.data.batch_size,
         shuffle=True,
-        num_workers=base_config.data.num_workers,
+        num_workers=0,  # Disable multiprocessing in Ray workers
         collate_fn=collate_fn,
-        pin_memory=base_config.data.pin_memory,
-        persistent_workers=True if base_config.data.num_workers > 0 else False,  # Keep workers alive
-        prefetch_factor=2  # Prefetch 2 batches per worker
+        pin_memory=base_config.data.pin_memory
     )
 
     val_loader = DataLoader(
         val_dataset,
         batch_size=base_config.data.batch_size,
         shuffle=False,
-        num_workers=base_config.data.num_workers,
+        num_workers=0,  # Disable multiprocessing in Ray workers
         collate_fn=collate_fn,
-        pin_memory=base_config.data.pin_memory,
-        persistent_workers=True if base_config.data.num_workers > 0 else False,
-        prefetch_factor=2
+        pin_memory=base_config.data.pin_memory
     )
 
     # Create model
     model = create_model(base_config.model, device=device)
 
-    # Create optimizer
-    optimizer = optim.Adam(
+    # Create optimizer (AdamW recommended for transformers/DETR)
+    optimizer_class = optim.AdamW if is_detr else optim.Adam
+    optimizer = optimizer_class(
         model.parameters(),
         lr=base_config.training.learning_rate,
         weight_decay=base_config.training.weight_decay
     )
 
-    # Create scheduler
+    # Create scheduler with warmup support
     scheduler = None
-    if base_config.training.scheduler == 'cosine':
+    if is_detr and hasattr(base_config.training, 'warmup_steps') and base_config.training.warmup_steps > 0:
+        # DETR uses warmup + cosine annealing
+        # Import warmup scheduler from train.py
+        from scripts.train import get_warmup_cosine_scheduler
+
+        total_steps = base_config.training.num_epochs * len(train_dataset) // base_config.data.batch_size
+        scheduler = get_warmup_cosine_scheduler(
+            optimizer=optimizer,
+            warmup_steps=base_config.training.warmup_steps,
+            total_steps=total_steps,
+            min_lr=getattr(base_config.training, 'min_lr', 1e-6),
+            base_lr=base_config.training.learning_rate
+        )
+    elif base_config.training.scheduler == 'cosine':
+        # Regular cosine without warmup
         scheduler = CosineAnnealingLR(
             optimizer,
             T_max=base_config.training.num_epochs,
-            eta_min=base_config.training.min_lr
+            eta_min=getattr(base_config.training, 'min_lr', 1e-6)
         )
 
     # Create loss function
@@ -207,6 +261,10 @@ def train_boundary_model(config_dict: Dict[str, Any],
                 'loss_position_weight': base_config.training.loss_position_weight,
                 'loss_confidence_weight': base_config.training.loss_confidence_weight,
                 'loss_eos_coef': base_config.training.loss_eos_coef,
+                'matcher_cost_position': getattr(base_config.training, 'matcher_cost_position', 5.0),
+                'matcher_cost_confidence': getattr(base_config.training, 'matcher_cost_confidence', 2.0),
+                'loss_focal_alpha': getattr(base_config.training, 'loss_focal_alpha', 0.25),
+                'loss_focal_gamma': getattr(base_config.training, 'loss_focal_gamma', 2.0),
                 'get': lambda self, key, default=None: getattr(self, key, default)
             })(),
             use_focal_loss=getattr(base_config.training, 'use_focal_loss', False)
@@ -241,8 +299,17 @@ def train_boundary_model(config_dict: Dict[str, Any],
         metric_tolerances = getattr(base_config.training, 'metric_tolerances', [1.0, 2.0, 3.0])
         tolerance_frames = [tol * base_config.data.fps for tol in metric_tolerances]
 
+        # Get gradient clipping value
+        gradient_clip = getattr(base_config.training, 'gradient_clip_val', 0.1)
+
         # Training loop with Ray Tune reporting
+        print(f"Starting training with {len(train_loader)} batches per epoch")
+
         for epoch in range(start_epoch, base_config.training.num_epochs):
+            print(f"\n{'='*80}")
+            print(f"Epoch {epoch+1}/{base_config.training.num_epochs}")
+            print(f"{'='*80}")
+
             # Training
             model.train()
             train_loss_sum = 0.0
@@ -253,7 +320,15 @@ def train_boundary_model(config_dict: Dict[str, Any],
                 train_metrics_sum[f'f1@{tol}'] = 0.0
             num_train_batches = 0
 
-            for batch in train_loader:
+            # For periodic reporting during epoch
+            log_interval = max(1, len(train_loader) // 10)  # Log 10 times per epoch
+
+            for batch_idx, batch in enumerate(train_loader):
+                # Log progress every N batches to show we're not stuck
+                if batch_idx % log_interval == 0:
+                    print(f"  Processing batch {batch_idx}/{len(train_loader)} "
+                          f"(Epoch {epoch+1}/{base_config.training.num_epochs})")
+
                 tokenized_actions = batch['tokenized_actions'].to(device)
                 dino_features = batch['dino_features'].to(device)
                 targets = move_targets_to_device(batch['targets'], device)
@@ -264,27 +339,50 @@ def train_boundary_model(config_dict: Dict[str, Any],
 
                 optimizer.zero_grad()
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.1)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=gradient_clip)
                 optimizer.step()
+
+                # Step warmup scheduler per batch if using warmup
+                if scheduler is not None and hasattr(base_config.training, 'warmup_steps') and base_config.training.warmup_steps > 0:
+                    scheduler.step()
 
                 train_loss_sum += loss.item()
 
-                # Compute metrics
-                batch_metrics = compute_detr_metrics(
-                    predictions, targets, base_config.model.prediction_window_size,
-                    getattr(base_config.training, 'confidence_threshold', 0.5),
-                    tolerance_frames
-                )
-                for key, value in batch_metrics.items():
-                    if key in train_metrics_sum:
-                        train_metrics_sum[key] += value
+                # Compute training metrics periodically (less frequently to save time)
+                # Only compute every 50 batches during training to avoid slowdown
+                if batch_idx % 50 == 0:
+                    batch_metrics = compute_detr_metrics(
+                        predictions, targets, base_config.model.prediction_window_size,
+                        getattr(base_config.training, 'confidence_threshold', 0.5),
+                        tolerance_frames,
+                        compute_map=False  # Disable mAP during training for speed
+                    )
+                    for key, value in batch_metrics.items():
+                        if key in train_metrics_sum:
+                            # Convert to Python scalar if it's a tensor
+                            if isinstance(value, torch.Tensor):
+                                value = value.item()
+                            train_metrics_sum[key] += value
 
                 num_train_batches += 1
 
+                # Log running average every log_interval batches
+                if (batch_idx + 1) % log_interval == 0 and num_train_batches > 0:
+                    avg_loss_so_far = train_loss_sum / num_train_batches
+                    print(f"  Batch {batch_idx+1}/{len(train_loader)}: "
+                          f"Avg Loss={avg_loss_so_far:.4f}, LR={optimizer.param_groups[0]['lr']:.6f}")
+
             avg_train_loss = train_loss_sum / num_train_batches
-            avg_train_metrics = {k: v / num_train_batches for k, v in train_metrics_sum.items()}
+            # Average metrics: count how many times we computed them (every 50 batches)
+            num_metric_computations = max((num_train_batches + 49) // 50, 1)
+            avg_train_metrics = {k: v / num_metric_computations for k, v in train_metrics_sum.items()}
+
+            first_tol = tolerance_frames[0]
+            train_f1 = avg_train_metrics.get(f'f1@{first_tol}', 0.0)
+            print(f"\n  Training complete: Avg Loss={avg_train_loss:.4f}, F1={train_f1:.3f}")
 
             # Validation
+            print(f"\n  Starting validation ({len(val_loader)} batches)...")
             model.eval()
             val_loss_sum = 0.0
             val_metrics_sum = {}
@@ -294,8 +392,13 @@ def train_boundary_model(config_dict: Dict[str, Any],
                 val_metrics_sum[f'f1@{tol}'] = 0.0
             num_val_batches = 0
 
+            val_log_interval = max(1, len(val_loader) // 5)  # Log 5 times during validation
+
             with torch.no_grad():
-                for batch in val_loader:
+                for batch_idx, batch in enumerate(val_loader):
+                    if batch_idx % val_log_interval == 0:
+                        print(f"    Validating batch {batch_idx}/{len(val_loader)}")
+
                     tokenized_actions = batch['tokenized_actions'].to(device)
                     dino_features = batch['dino_features'].to(device)
                     targets = move_targets_to_device(batch['targets'], device)
@@ -308,10 +411,14 @@ def train_boundary_model(config_dict: Dict[str, Any],
                     batch_metrics = compute_detr_metrics(
                         predictions, targets, base_config.model.prediction_window_size,
                         getattr(base_config.training, 'confidence_threshold', 0.5),
-                        tolerance_frames
+                        tolerance_frames,
+                        compute_map=False  # Disable mAP for speed during tuning
                     )
                     for key, value in batch_metrics.items():
                         if key in val_metrics_sum:
+                            # Convert to Python scalar if it's a tensor
+                            if isinstance(value, torch.Tensor):
+                                value = value.item()
                             val_metrics_sum[key] += value
 
                     num_val_batches += 1
@@ -319,28 +426,47 @@ def train_boundary_model(config_dict: Dict[str, Any],
             avg_val_loss = val_loss_sum / num_val_batches
             avg_val_metrics = {k: v / num_val_batches for k, v in val_metrics_sum.items()}
 
-            # Update scheduler
-            if scheduler is not None:
+            val_f1 = avg_val_metrics.get(f'f1@{first_tol}', 0.0)
+            val_precision = avg_val_metrics.get(f'precision@{first_tol}', 0.0)
+            val_recall = avg_val_metrics.get(f'recall@{first_tol}', 0.0)
+            print(f"  Validation complete: Loss={avg_val_loss:.4f}, "
+                  f"P={val_precision:.3f}, R={val_recall:.3f}, F1={val_f1:.3f}")
+
+            # Update epoch-based scheduler (not warmup scheduler - that steps per batch)
+            if scheduler is not None and not (hasattr(base_config.training, 'warmup_steps') and base_config.training.warmup_steps > 0):
                 scheduler.step()
 
-            # Prepare metrics for Ray Tune
-            first_tol = tolerance_frames[0]
+            # Prepare metrics for Ray Tune (ensure all values are Python scalars)
+            def to_scalar(value):
+                """Convert value to Python scalar."""
+                if isinstance(value, torch.Tensor):
+                    return value.item()
+                return float(value)
+
             metrics = {
-                'train_loss': avg_train_loss,
-                'val_loss': avg_val_loss,
-                'val_f1': avg_val_metrics.get(f'f1@{first_tol}', 0.0),
-                'val_precision': avg_val_metrics.get(f'precision@{first_tol}', 0.0),
-                'val_recall': avg_val_metrics.get(f'recall@{first_tol}', 0.0),
-                'epoch': epoch
+                'train_loss': to_scalar(avg_train_loss),
+                'train_f1': to_scalar(train_f1),
+                'train_precision': to_scalar(avg_train_metrics.get(f'precision@{first_tol}', 0.0)),
+                'train_recall': to_scalar(avg_train_metrics.get(f'recall@{first_tol}', 0.0)),
+                'val_loss': to_scalar(avg_val_loss),
+                'val_f1': to_scalar(val_f1),
+                'val_precision': to_scalar(val_precision),
+                'val_recall': to_scalar(val_recall),
+                'epoch': int(epoch),
+                'learning_rate': float(optimizer.param_groups[0]['lr'])
             }
 
             # Add tolerance-specific metrics
             for tol in tolerance_frames:
-                metrics[f'val_f1_tol_{tol}'] = avg_val_metrics.get(f'f1@{tol}', 0.0)
-                metrics[f'val_precision_tol_{tol}'] = avg_val_metrics.get(f'precision@{tol}', 0.0)
-                metrics[f'val_recall_tol_{tol}'] = avg_val_metrics.get(f'recall@{tol}', 0.0)
+                metrics[f'train_f1_tol_{tol}'] = to_scalar(avg_train_metrics.get(f'f1@{tol}', 0.0))
+                metrics[f'train_precision_tol_{tol}'] = to_scalar(avg_train_metrics.get(f'precision@{tol}', 0.0))
+                metrics[f'train_recall_tol_{tol}'] = to_scalar(avg_train_metrics.get(f'recall@{tol}', 0.0))
+                metrics[f'val_f1_tol_{tol}'] = to_scalar(avg_val_metrics.get(f'f1@{tol}', 0.0))
+                metrics[f'val_precision_tol_{tol}'] = to_scalar(avg_val_metrics.get(f'precision@{tol}', 0.0))
+                metrics[f'val_recall_tol_{tol}'] = to_scalar(avg_val_metrics.get(f'recall@{tol}', 0.0))
 
             # Report to Ray Tune
+            print(f"\n  Reporting to Ray Tune: epoch={epoch+1}, val_f1={val_f1:.3f}, val_loss={avg_val_loss:.4f}")
             tune.report(metrics)
 
     else:
@@ -446,7 +572,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         '--max-concurrent-trials',
         type=int,
-        default=16,
+        default=32,
         help='Maximum number of concurrent trials'
     )
 
@@ -495,14 +621,27 @@ def parse_args() -> argparse.Namespace:
         help='Name for the experiment'
     )
 
+    parser.add_argument(
+        '--tier',
+        type=str,
+        choices=['essential', 'standard', 'full', 'experimental'],
+        default='standard',
+        help='Search space tier (essential=Tier1+2, standard=+Tier3, full=+Tier4, experimental=+Tier5)'
+    )
+
     return parser.parse_args()
 
 
-def get_search_space(base_config_path: str) -> Dict[str, Any]:
-    """Define the hyperparameter search space.
+def get_search_space(base_config_path: str, tier: str = 'full') -> Dict[str, Any]:
+    """Define the DETR-specific hyperparameter search space.
 
     Args:
         base_config_path: Path to base config to extract reasonable ranges
+        tier: Search tier:
+            - 'essential': Only most critical parameters (Tier 1+2)
+            - 'standard': Essential + regularization (Tier 1+2+3)
+            - 'full': All parameters including architecture (Tier 1+2+3+4)
+            - 'experimental': Full + focal loss exploration
 
     Returns:
         Dictionary defining the search space
@@ -510,36 +649,83 @@ def get_search_space(base_config_path: str) -> Dict[str, Any]:
     # Load base config to get reasonable ranges
     base_config = load_config(base_config_path)
 
+    # ===== TIER 1: Loss Weights and Hungarian Matching (ALWAYS INCLUDED) =====
+    # These are the MOST CRITICAL parameters for DETR performance
     search_space = {
-        # Learning rate: log-uniform search
-        'learning_rate': tune.loguniform(1e-5, 1e-3),
+        # Loss component weights: balance position accuracy vs confidence calibration
+        'loss_position_weight': tune.uniform(2.0, 10.0),  # Higher = prioritize position accuracy
+        'loss_confidence_weight': tune.uniform(1.0, 5.0),  # Higher = prioritize confidence calibration
 
-        # Classification threshold: uniform search around base value
-        'classification_threshold': tune.uniform(0.3, 0.6),
+        # EOS coefficient: controls class imbalance (lower = upweight rare boundaries)
+        # 0.1 means positive class weighted 10x more than negative
+        'loss_eos_coef': tune.loguniform(0.05, 0.3),  # Critical for handling sparse boundaries
 
-        # Weight decay: log-uniform search
-        'weight_decay': tune.loguniform(1e-6, 1e-3),
-
-        # Batch size: choice of powers of 2
-        'batch_size': tune.choice([512, 1024, 2048, 4096]),
-
-        # Dropout rates
-        'transformer_dropout': tune.uniform(0.1, 0.5),
-        'mlp_dropout': tune.uniform(0.1, 0.5),
-
-        # Feature noise for regularization
-        'feature_noise_std': tune.uniform(0.0, 0.1),
+        # Hungarian matcher costs: control how predictions are matched to ground truth
+        # These should generally match the loss weights but can be tuned independently
+        'matcher_cost_position': tune.uniform(2.0, 10.0),
+        'matcher_cost_confidence': tune.uniform(1.0, 5.0),
     }
 
-    # Add loss-specific parameters based on loss type
-    if hasattr(base_config.training, 'loss_pos_weight'):
-        search_space['loss_pos_weight'] = tune.uniform(5.0, 20.0)
+    # ===== TIER 2: Optimization (ALWAYS INCLUDED) =====
+    # Core training hyperparameters
+    search_space.update({
+        # Learning rate: DETR needs lower LR than typical models
+        'learning_rate': tune.loguniform(1e-5, 5e-4),  # Conservative range for stability
 
-    if hasattr(base_config.training, 'loss_alpha'):
-        search_space['loss_alpha'] = tune.uniform(0.1, 0.5)
+        # Weight decay: important for AdamW optimizer
+        'weight_decay': tune.loguniform(1e-5, 1e-3),
 
-    if hasattr(base_config.training, 'loss_gamma'):
-        search_space['loss_gamma'] = tune.uniform(1.0, 3.0)
+        # Batch size: smaller for DETR due to transformer memory requirements
+        'batch_size': tune.choice([32, 64, 128, 256]),  # Much smaller than baseline
+
+        # Warmup steps: critical for DETR training stability
+        'warmup_steps': tune.choice([500, 1000, 2000, 3000]),
+
+        # Gradient clipping: prevents exploding gradients in transformers
+        'gradient_clip_val': tune.uniform(0.05, 0.5),
+    })
+
+    # ===== TIER 3: Regularization (Dropout) =====
+    if tier in ['standard', 'full', 'experimental']:
+        search_space.update({
+            # DETR transformer dropout
+            'detr_dropout': tune.uniform(0.05, 0.3),
+
+            # Cross-modal attention dropout
+            'attention_dropout': tune.uniform(0.05, 0.2),
+
+            # Visual encoder dropout
+            'visual_dropout': tune.uniform(0.1, 0.4),
+        })
+
+    # ===== TIER 4: Architecture (Model Capacity) =====
+    if tier in ['full', 'experimental']:
+        search_space.update({
+            # Number of boundary queries: max boundaries model can detect
+            'num_boundary_queries': tune.choice([6, 9, 12]),  # 9 is baseline for 18-frame window
+
+            # Encoder/decoder depth: deeper = more capacity but slower
+            'num_encoder_layers': tune.choice([4, 6, 8]),
+            'num_decoder_layers': tune.choice([4, 6, 8]),
+
+            # Model dimension: width of transformer
+            'd_model': tune.choice([256, 512, 768]),  # 512 is baseline
+
+            # Feedforward dimension: typically 4x d_model
+            # Note: This will be automatically adjusted based on d_model
+            'detr_feedforward_dim': tune.choice([1024, 2048, 3072]),
+        })
+
+    # ===== TIER 5: Experimental (Focal Loss) =====
+    if tier == 'experimental':
+        search_space.update({
+            # Whether to use focal loss instead of BCE for confidence
+            'use_focal_loss': tune.choice([False, True]),
+
+            # Focal loss parameters (only used if use_focal_loss=True)
+            'loss_focal_alpha': tune.uniform(0.2, 0.4),  # Class balance
+            'loss_focal_gamma': tune.uniform(1.5, 3.0),  # Focus on hard examples
+        })
 
     return search_space
 
@@ -549,19 +735,20 @@ def main():
     args = parse_args()
 
     print("="*80)
-    print("Ray Tune Hyperparameter Search")
+    print("Ray Tune Hyperparameter Search (DETR-Optimized)")
     print("="*80)
     print(f"Base config: {args.config}")
     print(f"Number of trials: {args.num_trials}")
     print(f"GPUs per trial: {args.gpus_per_trial}")
+    print(f"Search tier: {args.tier}")
     print(f"Search algorithm: {args.search_alg}")
     print(f"Scheduler: {args.scheduler}")
     print(f"Metric to optimize: {args.metric} ({args.mode})")
     print(f"Results directory: {args.results_dir}")
     print("="*80)
 
-    # Get search space
-    search_space = get_search_space(args.config)
+    # Get DETR-specific search space
+    search_space = get_search_space(args.config, tier=args.tier)
 
     print("\nSearch space:")
     for key, value in search_space.items():
@@ -587,20 +774,26 @@ def main():
             reduction_factor=3
         )
     elif args.scheduler == 'pbt':
+        # DETR-specific PBT mutations
         scheduler = PopulationBasedTraining(
             time_attr='epoch',
             metric=args.metric,
             mode=args.mode,
             perturbation_interval=5,
             hyperparam_mutations={
-                'learning_rate': tune.loguniform(1e-5, 1e-3),
-                'weight_decay': tune.loguniform(1e-6, 1e-3),
+                # Core optimization
+                'learning_rate': tune.loguniform(1e-5, 5e-4),
+                'weight_decay': tune.loguniform(1e-5, 1e-3),
+                # Loss weights (critical for DETR)
+                'loss_position_weight': tune.uniform(2.0, 10.0),
+                'loss_confidence_weight': tune.uniform(1.0, 5.0),
+                'loss_eos_coef': tune.loguniform(0.05, 0.3),
             }
         )
 
     # Setup reporter
     reporter = CLIReporter(
-        metric_columns=[args.metric, "val_loss", "train_loss", "epoch"],
+        metric_columns=[args.metric, "val_loss", "train_loss", "learning_rate", "epoch"],
         max_report_frequency=30
     )
 

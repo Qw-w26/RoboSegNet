@@ -38,8 +38,10 @@ def generate_latex_table(csv_path, output_path=None, bold_best=True, use_colors=
     tasks = sorted(df['task'].unique())
     methods = df['ablation'].unique()
 
-    # Metrics to include (excluding ablation, task, status)
-    metrics = [col for col in df.columns if col not in ['ablation', 'task', 'status']]
+    # Metrics to include - only specific ones requested
+    metrics_to_include = ['F1@1.0', 'F1@2.0', 'F1@3.0', 'Seg-F1@50%', 'Acc', 'Edit-Dist']
+    # Filter to only include metrics that exist in the dataframe
+    metrics = [m for m in metrics_to_include if m in df.columns]
 
     # Find best values for each metric and task (if bold_best is enabled)
     best_values = {}
@@ -47,9 +49,13 @@ def generate_latex_table(csv_path, output_path=None, bold_best=True, use_colors=
         for task in tasks:
             for metric in metrics:
                 task_data = df[df['task'] == task]
-                max_val = task_data[metric].max()
-                if pd.notna(max_val) and max_val > 0:
-                    best_values[(task, metric)] = max_val
+                # For Edit-Dist, lower is better; for others, higher is better
+                if metric == 'Edit-Dist':
+                    best_val = task_data[metric].min()
+                else:
+                    best_val = task_data[metric].max()
+                if pd.notna(best_val) and best_val > 0:
+                    best_values[(task, metric)] = best_val
 
     # Start building LaTeX table
     latex_lines = []
@@ -135,19 +141,32 @@ def generate_latex_table(csv_path, output_path=None, bold_best=True, use_colors=
     for task in tasks:
         for metric in metrics:
             # Clean up metric names
-            if metric.startswith('F1@'):
-                metric_name = f"F1@{metric.split('@')[1]}"
+            if metric == 'F1@1.0':
+                metric_name = "F1@1s"
+            elif metric == 'F1@2.0':
+                metric_name = "F1@2s"
+            elif metric == 'F1@3.0':
+                metric_name = "F1@3s"
+            elif metric == 'Seg-F1@50%':
+                metric_name = r"Seg-F1@50\%"
+            elif metric == 'Acc':
+                metric_name = "Acc"
+            elif metric == 'Edit-Dist':
+                metric_name = "Edit-Dist"
             else:
                 metric_name = metric.capitalize()
             header_parts.append(f"{{\\textbf{{{metric_name}}}}}")
 
     latex_lines.append("        " + " & ".join(header_parts) + r" \\")
 
-    # Add units row (all percentages)
+    # Add units row
     units_parts = [""]
     for task in tasks:
         for metric in metrics:
-            units_parts.append("{(\\%)}")
+            if metric == 'Edit-Dist':
+                units_parts.append("")  # Edit distance has no unit
+            else:
+                units_parts.append("{(\\%)}")  # All others are percentages
     latex_lines.append("        " + " & ".join(units_parts) + r" \\")
 
     latex_lines.append(r"        \midrule")
@@ -184,8 +203,11 @@ def generate_latex_table(csv_path, output_path=None, bold_best=True, use_colors=
     latex_lines.append(r"    \captionsetup{font=scriptsize, justification=justified}")
     latex_lines.append(r"    \caption*{")
     latex_lines.append(r"        \textit{Note:} ")
-    latex_lines.append(r"        F1@X.0 represents F1 score at different thresholds. ")
-    latex_lines.append(r"        All values are reported as percentages. ")
+    latex_lines.append(r"        F1@Xs represents F1 score at X second threshold. ")
+    latex_lines.append(r"        Seg-F1@50\% represents segmental F1 score at 50\% overlap threshold. ")
+    latex_lines.append(r"        Acc represents frame-level accuracy. ")
+    latex_lines.append(r"        Edit-Dist represents edit distance (lower is better). ")
+    latex_lines.append(r"        All values except Edit-Dist are reported as percentages. ")
     if bold_best:
         latex_lines.append(r"        Best results per metric are shown in \textbf{bold}. ")
     latex_lines.append(r"        '--' indicates no data or zero value.")

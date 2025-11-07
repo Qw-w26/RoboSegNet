@@ -237,7 +237,9 @@ class TrainingConfig:
 
         # Regularization
         gradient_clip_val: Gradient clipping value (None to disable)
+        gradient_clip_type: Type of gradient clipping ('norm' or 'value')
         use_amp: Use automatic mixed precision
+        gradient_accumulation_steps: Number of batches to accumulate gradients before optimizer step
 
         # Checkpointing
         checkpoint_dir: Directory for checkpoints
@@ -300,6 +302,7 @@ class TrainingConfig:
     gradient_clip_val: Optional[float] = None
     gradient_clip_type: str = 'norm'  # 'norm' or 'value'
     use_amp: bool = False
+    gradient_accumulation_steps: int = 1  # Number of batches to accumulate gradients
 
     # Checkpointing
     checkpoint_dir: str = './checkpoints'
