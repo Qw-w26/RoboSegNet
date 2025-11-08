@@ -157,6 +157,7 @@ class AblationStudy:
             'modifications': {
                 'model.use_proprio': True,
                 'model.use_dino': False,
+                'model.architecture': 'mlp',
                 'training.loss_type': 'mse_raw',
                 'training.optimizer': 'adam',
                 'experiment_name': 'ablation_pure_proprio'
@@ -168,6 +169,7 @@ class AblationStudy:
             'modifications': {
                 'model.use_proprio': False,
                 'model.use_dino': True,
+                 'model.architecture': 'mlp',
                 'training.loss_type': 'mse_raw',
                 'training.optimizer': 'adam',
                 'experiment_name': 'ablation_pure_visual'
