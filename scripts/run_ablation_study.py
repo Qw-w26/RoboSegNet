@@ -157,6 +157,8 @@ class AblationStudy:
             'modifications': {
                 'model.use_proprio': True,
                 'model.use_dino': False,
+                'training.loss_type': 'mse_raw',
+                'training.optimizer': 'adam',
                 'experiment_name': 'ablation_pure_proprio'
             }
         },
@@ -166,6 +168,8 @@ class AblationStudy:
             'modifications': {
                 'model.use_proprio': False,
                 'model.use_dino': True,
+                'training.loss_type': 'mse_raw',
+                'training.optimizer': 'adam',
                 'experiment_name': 'ablation_pure_visual'
             }
         },
@@ -176,7 +180,7 @@ class AblationStudy:
                 'model.architecture': 'mlp',
                 'training.loss_type': 'mse_raw',
                 'training.optimizer': 'adam',
-                'data.batch_size': 128,  # Can use larger batch with simpler model
+                # 'data.batch_size': 128,  # Can use larger batch with simpler model
                 'experiment_name': 'ablation_mlp_mse'
             }
         },
@@ -191,16 +195,16 @@ class AblationStudy:
                 'experiment_name': 'ablation_detr_no_cross_attn'
             }
         },
-        'cross_attn_mse': {
-            'name': 'Cross Attention + MSE',
-            'description': 'Cross-modal transformer with MSE loss (no Hungarian matching)',
-            'modifications': {
-                'model.architecture': 'cross_modal_transformer',
-                'training.loss_type': 'mse_raw',
-                'training.optimizer': 'adamw',
-                'experiment_name': 'ablation_cross_attn_mse'
-            }
-        },
+        # 'cross_attn_mse': {
+        #     'name': 'Cross Attention + MSE',
+        #     'description': 'Cross-modal transformer with MSE loss (no Hungarian matching)',
+        #     'modifications': {
+        #         'model.architecture': 'cross_modal_transformer',
+        #         'training.loss_type': 'mse_raw',
+        #         'training.optimizer': 'adamw',
+        #         'experiment_name': 'ablation_cross_attn_mse'
+        #     }
+        # },
         'single_task': {
             'name': 'Single Task Baseline',
             'description': 'Baseline with default architecture trained per task',
@@ -325,11 +329,37 @@ class AblationStudy:
         print(f"Checkpoint dir: {checkpoint_dir}")
         print(f"{'='*80}\n")
 
+        # Check for existing checkpoints to resume from
+        resume_checkpoint = None
+        if checkpoint_dir.exists():
+            # Look for any existing checkpoint to resume from
+            # Prioritize: best checkpoint > last checkpoint > latest checkpoint
+            best_checkpoints = list(checkpoint_dir.glob('best_*.pt'))
+            last_checkpoints = list(checkpoint_dir.glob('last_*.pt'))
+            latest_checkpoints = list(checkpoint_dir.glob('checkpoint_epoch_*.pt'))
+
+            if best_checkpoints:
+                resume_checkpoint = best_checkpoints[0]
+            elif last_checkpoints:
+                resume_checkpoint = last_checkpoints[0]
+            elif latest_checkpoints:
+                # Sort by epoch number to get the latest
+                latest_checkpoints.sort(key=lambda p: int(p.stem.split('_')[-1]))
+                resume_checkpoint = latest_checkpoints[-1]
+
+            if resume_checkpoint:
+                print(f"Found existing checkpoint: {resume_checkpoint}")
+                print(f"Will resume training from this checkpoint\n")
+
         # Construct training command
         cmd = [
             'python', 'scripts/train.py',
             '--config', str(config_path)
         ]
+
+        # Add resume flag if checkpoint exists
+        if resume_checkpoint:
+            cmd.extend(['--resume', str(resume_checkpoint)])
 
         # Run training
         result = subprocess.run(
@@ -955,7 +985,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         '--gpus-per-trial',
         type=float,
-        default=0.1,
+        default=1,
         help='Number of GPUs per trial (default: 1.0, use 0.5 to run 2 trials per GPU)'
     )
 

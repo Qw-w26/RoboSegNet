@@ -1,0 +1,1185 @@
+#!/usr/bin/env python3
+"""Run comprehensive multi-task ablation study for boundary detection models.
+
+This script runs ablation studies where each baseline trains a SINGLE model on
+MULTIPLE tasks simultaneously (multi-task training), then evaluates on both:
+- In-distribution tasks (the training tasks)
+- Out-of-distribution tasks (tasks >= 400)
+
+Key differences from run_ablation_study.py:
+- Each baseline trains ONE model on ALL training tasks (multi-task training)
+- Uses torchrun with 8 GPUs for distributed training
+- Evaluates on both in-distribution and out-of-distribution tasks
+- Reports separate metrics for in-dist vs OOD performance
+
+Training set: 327, 352, 354, 356, 357, 358, 359, 360, 365, 366, 367, 368,
+              372, 374, 375, 376, 377, 378, 380, 384, 385, 389, 390
+OOD test set: All tasks >= 400 (e.g., 410, 414, 421, 422, 424, 440)
+
+Ablation studies (all trained on multiple tasks):
+1. Pure proprioceptive (no visual features)
+2. Pure visual (no proprioceptive features)
+3. MLP + MSE loss
+4. Pure DETR (no cross attention)
+5. Cross attention + MSE loss
+6. Multi-task baseline (default architecture)
+
+Output metrics:
+Boundary Detection Metrics:
+- F1@1.0, F1@2.0, F1@3.0, etc. (Boundary F1 at different frame tolerances)
+- AP@1.0, AP@2.0, AP@3.0, etc. (Average Precision at different tolerances)
+- mAP (mean Average Precision)
+
+Action Segmentation Metrics (Standard):
+- Seg-F1@10%, Seg-F1@25%, Seg-F1@50% (Segmental F1 at IoU thresholds)
+- Edit-Dist (Segmental edit distance / Levenshtein distance)
+- Acc (Framewise accuracy)
+
+Usage:
+    # Run all ablations (each uses 8 GPUs)
+    python scripts/run_multi_task_ablation.py --base-config configs/experiments/multi_task_327_352_356_detr.yaml
+
+    # Run specific ablations
+    python scripts/run_multi_task_ablation.py --base-config configs/experiments/multi_task_327_352_356_detr.yaml \
+        --ablations pure_proprio pure_visual mlp_mse
+
+    # Quick test run (fewer epochs)
+    python scripts/run_multi_task_ablation.py --base-config configs/experiments/multi_task_327_352_356_detr.yaml \
+        --quick-test
+
+    # Limit parallelism (run 1 ablation at a time, each uses 8 GPUs)
+    python scripts/run_multi_task_ablation.py --base-config configs/experiments/multi_task_327_352_356_detr.yaml \
+        --num-parallel 1
+
+    # Use 4 GPUs per trial instead of 8
+    python scripts/run_multi_task_ablation.py --base-config configs/experiments/multi_task_327_352_356_detr.yaml \
+        --gpus-per-trial 4
+
+Author: Claude Code
+Date: November 2025
+"""
+
+import argparse
+import sys
+import os
+from pathlib import Path
+import subprocess
+import yaml
+import json
+from typing import List, Dict, Any
+from datetime import datetime
+import pandas as pd
+import ray
+from ray import tune
+from ray.tune import CLIReporter
+from ray.tune.callback import Callback
+
+# Add project root to path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from config import load_config
+
+
+class IncrementalResultsCallback(Callback):
+    """Ray Tune callback to update results incrementally as trials complete."""
+
+    def __init__(self, ablation_study: 'MultiTaskAblationStudy'):
+        """Initialize callback.
+
+        Args:
+            ablation_study: Reference to MultiTaskAblationStudy instance
+        """
+        self.ablation_study = ablation_study
+        self.processed_trials = set()
+
+    def on_trial_complete(self, iteration: int, trials, trial, **info):
+        """Called when a trial completes.
+
+        Args:
+            iteration: Current iteration
+            trials: List of all trials
+            trial: The trial that just completed
+            **info: Additional info
+        """
+        trial_id = trial.trial_id
+        if trial_id in self.processed_trials:
+            return
+
+        # Extract trial config
+        ablation_name = trial.config.get('ablation_name')
+
+        if not ablation_name:
+            return
+
+        # Reconstruct experiment name
+        exp_name = self.ablation_study.ABLATION_CONFIGS[ablation_name]['modifications']['experiment_name']
+
+        # Load evaluation results from filesystem
+        eval_dir = self.ablation_study.output_root / 'evaluations' / exp_name
+
+        # Load both in-distribution and OOD results
+        indist_results_file = eval_dir / 'indist_evaluation_results.json'
+        ood_results_file = eval_dir / 'ood_evaluation_results.json'
+
+        if indist_results_file.exists() and ood_results_file.exists():
+            with open(indist_results_file, 'r') as f:
+                indist_results = json.load(f)
+            with open(ood_results_file, 'r') as f:
+                ood_results = json.load(f)
+
+            result = {
+                'ablation': ablation_name,
+                'ablation_name': self.ablation_study.ABLATION_CONFIGS[ablation_name]['name'],
+                'description': self.ablation_study.ABLATION_CONFIGS[ablation_name]['description'],
+                'config_path': str(self.ablation_study.output_root / 'configs' / f'{exp_name}.yaml'),
+                'checkpoint_dir': f'./checkpoints/{exp_name}',
+                'training': {'status': 'completed'},
+                'evaluation_indist': indist_results,
+                'evaluation_ood': ood_results,
+                'status': 'completed'
+            }
+
+            # Update incrementally
+            self.ablation_study._update_incremental_results(result)
+            self.processed_trials.add(trial_id)
+
+
+class MultiTaskAblationStudy:
+    """Manages multi-task ablation study experiments."""
+
+    ABLATION_CONFIGS = {
+        'multi_task_baseline': {
+            'name': 'Multi-Task Baseline',
+            'description': 'Baseline with default architecture trained on multiple tasks',
+            'modifications': {
+                # Uses default settings from base config
+                'experiment_name': 'multi_task_ablation_baseline'
+            }
+        },
+        # 'pure_proprio': {
+        #     'name': 'Pure Proprioceptive',
+        #     'description': 'Only proprioceptive features, no visual input',
+        #     'modifications': {
+        #         'model.use_proprio': True,
+        #         'model.use_dino': False,
+        #         'experiment_name': 'multi_task_ablation_pure_proprio'
+        #     }
+        # },
+        # 'pure_visual': {
+        #     'name': 'Pure Visual',
+        #     'description': 'Only visual features, no proprioceptive input',
+        #     'modifications': {
+        #         'model.use_proprio': False,
+        #         'model.use_dino': True,
+        #         'experiment_name': 'multi_task_ablation_pure_visual'
+        #     }
+        # }
+        # 'mlp_mse': {
+        #     'name': 'MLP + MSE',
+        #     'description': 'Simple MLP architecture with MSE loss',
+        #     'modifications': {
+        #         'model.architecture': 'mlp',
+        #         'training.loss_type': 'mse_raw',
+        #         'training.optimizer': 'adam',
+        #         'data.batch_size': 128,
+        #         'experiment_name': 'multi_task_ablation_mlp_mse'
+        #     }
+        # },
+        # 'detr_no_cross_attn': {
+        #     'name': 'DETR No Cross Attention',
+        #     'description': 'DETR with both modalities but simple addition instead of cross-attention',
+        #     'modifications': {
+        #         'model.architecture': 'boundary_detr',
+        #         'model.use_proprio': True,
+        #         'model.use_dino': True,
+        #         'model.fusion_mode': 'add',
+        #         'experiment_name': 'multi_task_ablation_detr_no_cross_attn'
+        #     }
+        # },
+        # 'cross_attn_mse': {
+        #     'name': 'Cross Attention + MSE',
+        #     'description': 'Cross-modal transformer with MSE loss (no Hungarian matching)',
+        #     'modifications': {
+        #         'model.architecture': 'cross_modal_transformer',
+        #         'training.loss_type': 'mse_raw',
+        #         'training.optimizer': 'adamw',
+        #         'experiment_name': 'multi_task_ablation_cross_attn_mse'
+        #     }
+        # },
+    }
+
+    def __init__(
+        self,
+        base_config_path: str,
+        train_task_ids: List[int],
+        ood_task_ids: List[int] = None,
+        output_root: str = './multi_task_ablation_results',
+        quick_test: bool = False,
+        num_gpus: int = 8
+    ):
+        """Initialize multi-task ablation study.
+
+        Args:
+            base_config_path: Path to base configuration file
+            train_task_ids: List of task IDs to train on
+            ood_task_ids: List of OOD task IDs to evaluate on (default: tasks >= 400)
+            output_root: Root directory for ablation results
+            quick_test: If True, use reduced epochs for quick testing
+            num_gpus: Number of GPUs to use for each training run
+        """
+        self.base_config_path = base_config_path
+        self.base_config = load_config(base_config_path)
+        self.train_task_ids = train_task_ids
+        self.num_gpus = num_gpus
+        self.output_root = Path(output_root)
+        self.quick_test = quick_test
+
+        # Auto-detect OOD tasks if not specified
+        if ood_task_ids is None:
+            meta_dir = Path(self.base_config.data.meta_dir)
+            all_tasks = []
+            for task_dir in sorted(meta_dir.glob('task_*_processed')):
+                task_id = int(task_dir.name.split('_')[1])
+                all_tasks.append(task_id)
+
+            self.ood_task_ids = [tid for tid in all_tasks if tid >= 400]
+            print(f"Auto-detected OOD tasks (>= 400): {self.ood_task_ids}")
+        else:
+            self.ood_task_ids = ood_task_ids
+
+        # Create output directory
+        self.output_root.mkdir(parents=True, exist_ok=True)
+
+        # Results tracking
+        self.results = []
+
+    def create_ablation_config(
+        self,
+        ablation_name: str
+    ) -> Dict[str, Any]:
+        """Create configuration for multi-task ablation study.
+
+        Args:
+            ablation_name: Name of ablation study
+
+        Returns:
+            Modified configuration dictionary
+        """
+        if ablation_name not in self.ABLATION_CONFIGS:
+            raise ValueError(f"Unknown ablation: {ablation_name}")
+
+        # Load base config as dict
+        config_dict = yaml.safe_load(open(self.base_config_path))
+
+        # Get ablation modifications
+        ablation = self.ABLATION_CONFIGS[ablation_name]
+        modifications = ablation['modifications'].copy()
+
+        # Set unique checkpoint directory for this ablation
+        exp_name = modifications['experiment_name']
+        modifications['training.checkpoint_dir'] = f'./checkpoints/{exp_name}'
+
+        # Disable wandb for ablation studies
+        modifications['wandb.enabled'] = False
+
+        # Set task IDs for multi-task training
+        modifications['data.train_task_ids'] = self.train_task_ids
+        modifications['data.eval_task_ids'] = self.train_task_ids  # Evaluate on training tasks during training
+
+        # Quick test modifications
+        if self.quick_test:
+            modifications['training.num_epochs'] = 5  # Reduced for quick testing
+            modifications['training.early_stopping'] = True
+            modifications['training.patience'] = 5
+            modifications['data.max_samples'] = 1000
+
+        # Apply modifications using nested key access
+        for key, value in modifications.items():
+            keys = key.split('.')
+            target = config_dict
+            for k in keys[:-1]:
+                if k not in target:
+                    target[k] = {}
+                target = target[k]
+            target[keys[-1]] = value
+
+        return config_dict
+
+    def save_config(self, config: Dict[str, Any], output_path: Path):
+        """Save configuration to YAML file."""
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, 'w') as f:
+            yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+
+    def run_training(
+        self,
+        config_path: Path,
+        checkpoint_dir: Path,
+        num_gpus: int = 8
+    ) -> Dict[str, Any]:
+        """Run multi-GPU training with torchrun.
+
+        Args:
+            config_path: Path to configuration file
+            checkpoint_dir: Directory for checkpoints
+            num_gpus: Number of GPUs to use
+
+        Returns:
+            Training results dictionary
+        """
+        print(f"\n{'='*80}")
+        print(f"Training: {config_path.stem}")
+        print(f"Config: {config_path}")
+        print(f"Checkpoint dir: {checkpoint_dir}")
+        print(f"GPUs: {num_gpus}")
+        print(f"{'='*80}\n")
+
+        # Construct torchrun command
+        cmd = [
+            'torchrun',
+            f'--nproc_per_node={num_gpus}',
+            '--master_port=29500',
+            'scripts/train.py',
+            '--config', str(config_path)
+        ]
+
+        # Run training
+        result = subprocess.run(
+            cmd,
+            cwd=Path(__file__).parent.parent,
+            capture_output=False
+        )
+
+        if result.returncode != 0:
+            print(f"WARNING: Training failed for {config_path.stem}")
+            return {'status': 'failed'}
+
+        # Find best checkpoint
+        best_checkpoint = None
+        if checkpoint_dir.exists():
+            checkpoints = list(checkpoint_dir.glob('best_*.pt'))
+            if checkpoints:
+                best_checkpoint = checkpoints[0]
+
+        return {
+            'status': 'completed',
+            'checkpoint': str(best_checkpoint) if best_checkpoint else None
+        }
+
+    def run_evaluation(
+        self,
+        checkpoint_path: Path,
+        config_path: Path,
+        task_ids: List[int],
+        output_dir: Path,
+        eval_name: str = "evaluation"
+    ) -> Dict[str, Any]:
+        """Run evaluation on checkpoint.
+
+        Args:
+            checkpoint_path: Path to model checkpoint
+            config_path: Path to config file
+            task_ids: Task IDs to evaluate on
+            output_dir: Output directory for results
+            eval_name: Name for this evaluation (e.g., "indist", "ood")
+
+        Returns:
+            Evaluation results dictionary
+        """
+        print(f"\n{'='*80}")
+        print(f"Evaluating ({eval_name}): {checkpoint_path.stem}")
+        print(f"Config: {config_path}")
+        print(f"Tasks: {task_ids}")
+        print(f"Output: {output_dir}")
+        print(f"{'='*80}\n")
+
+        # Use evaluate_ablation.py script
+        cmd = [
+            'python', 'scripts/evaluate_ablation.py',
+            '--checkpoint', str(checkpoint_path),
+            '--config', str(config_path),
+            '--task-ids'] + [str(tid) for tid in task_ids] + [
+            '--output-dir', str(output_dir)
+        ]
+
+        # Run evaluation
+        result = subprocess.run(
+            cmd,
+            cwd=Path(__file__).parent.parent,
+            capture_output=False
+        )
+
+        if result.returncode != 0:
+            print(f"WARNING: Evaluation failed")
+            return {'status': 'failed'}
+
+        # Load results from JSON
+        results_file = output_dir / 'evaluation_results.json'
+        if results_file.exists():
+            with open(results_file, 'r') as f:
+                all_results = json.load(f)
+            return all_results
+        else:
+            print(f"WARNING: No results file found at {results_file}")
+            return {'status': 'failed'}
+
+    def _run_single_ablation_instance(
+        self,
+        ablation_name: str,
+        run_training: bool,
+        run_evaluation: bool
+    ) -> Dict[str, Any]:
+        """Run single instance of multi-task ablation study."""
+        # Create config
+        config = self.create_ablation_config(ablation_name)
+
+        # Setup paths
+        exp_name = config['experiment_name']
+        config_path = self.output_root / 'configs' / f'{exp_name}.yaml'
+        checkpoint_dir = Path(config['training']['checkpoint_dir'])
+        eval_dir = self.output_root / 'evaluations' / exp_name
+
+        # Save config
+        self.save_config(config, config_path)
+        print(f"Saved config to: {config_path}")
+
+        # Run training
+        train_result = None
+        if run_training:
+            train_result = self.run_training(config_path, checkpoint_dir, self.num_gpus)
+
+            if train_result['status'] != 'completed':
+                return {
+                    'ablation': ablation_name,
+                    'status': 'training_failed',
+                    'config_path': str(config_path)
+                }
+
+        # Run evaluation on both in-distribution and OOD tasks
+        indist_result = None
+        ood_result = None
+
+        if run_evaluation:
+            checkpoint = train_result.get('checkpoint') if train_result else None
+
+            # Find checkpoint if not provided
+            if checkpoint is None and checkpoint_dir.exists():
+                checkpoints = list(checkpoint_dir.glob('best_*.pt'))
+                if checkpoints:
+                    checkpoint = checkpoints[0]
+
+            if checkpoint:
+                # Evaluate on in-distribution tasks
+                indist_eval_dir = eval_dir / 'indist'
+                indist_result = self.run_evaluation(
+                    checkpoint_path=Path(checkpoint),
+                    config_path=config_path,
+                    task_ids=self.train_task_ids,
+                    output_dir=indist_eval_dir,
+                    eval_name="in-distribution"
+                )
+
+                # Save in-dist results separately
+                indist_results_file = eval_dir / 'indist_evaluation_results.json'
+                indist_results_file.parent.mkdir(parents=True, exist_ok=True)
+                with open(indist_results_file, 'w') as f:
+                    json.dump(indist_result, f, indent=2)
+
+                # Evaluate on OOD tasks
+                if self.ood_task_ids:
+                    ood_eval_dir = eval_dir / 'ood'
+                    ood_result = self.run_evaluation(
+                        checkpoint_path=Path(checkpoint),
+                        config_path=config_path,
+                        task_ids=self.ood_task_ids,
+                        output_dir=ood_eval_dir,
+                        eval_name="out-of-distribution"
+                    )
+
+                    # Save OOD results separately
+                    ood_results_file = eval_dir / 'ood_evaluation_results.json'
+                    with open(ood_results_file, 'w') as f:
+                        json.dump(ood_result, f, indent=2)
+            else:
+                print("WARNING: No checkpoint found for evaluation")
+
+        # Compile results
+        result = {
+            'ablation': ablation_name,
+            'ablation_name': self.ABLATION_CONFIGS[ablation_name]['name'],
+            'description': self.ABLATION_CONFIGS[ablation_name]['description'],
+            'config_path': str(config_path),
+            'checkpoint_dir': str(checkpoint_dir),
+            'training': train_result,
+            'evaluation_indist': indist_result,
+            'evaluation_ood': ood_result,
+            'status': 'completed'
+        }
+
+        # Save result
+        self.results.append(result)
+
+        return result
+
+    def _update_incremental_results(self, new_result: Dict[str, Any]):
+        """Update results incrementally after each trial completion.
+
+        Args:
+            new_result: Result dictionary from completed trial
+        """
+        # Add to results list
+        self.results.append(new_result)
+
+        # Save detailed results to JSON immediately
+        results_file = self.output_root / 'multi_task_ablation_results.json'
+        with open(results_file, 'w') as f:
+            json.dump(self.results, f, indent=2)
+
+        # Update summary CSVs
+        self._update_summary_csvs()
+
+        # Print progress
+        print(f"\n{'='*80}")
+        print(f"INCREMENTAL UPDATE: {len(self.results)} experiments completed")
+        print(f"{'='*80}")
+        print(f"Latest: {new_result['ablation_name']}")
+
+        if 'evaluation_indist' in new_result and new_result['evaluation_indist']:
+            print(f"\nIn-Distribution Performance:")
+            self._print_aggregate_metrics(new_result['evaluation_indist'])
+
+        if 'evaluation_ood' in new_result and new_result['evaluation_ood']:
+            print(f"\nOut-of-Distribution Performance:")
+            self._print_aggregate_metrics(new_result['evaluation_ood'])
+
+        print(f"{'='*80}\n")
+
+    def _print_aggregate_metrics(self, evaluation: Dict[str, Any]):
+        """Print aggregate metrics across tasks."""
+        # Collect metrics across all tasks
+        all_metrics = {}
+        num_tasks = 0
+
+        for task_key, task_eval in evaluation.items():
+            if isinstance(task_eval, dict) and 'status' not in task_eval:
+                num_tasks += 1
+                for metric_name, value in task_eval.items():
+                    if isinstance(value, (int, float)):
+                        if metric_name not in all_metrics:
+                            all_metrics[metric_name] = []
+                        all_metrics[metric_name].append(value)
+
+        # Print averages
+        if num_tasks > 0:
+            print(f"  Tasks evaluated: {num_tasks}")
+            for metric_name in ['f1@2.0', 'seg_f1@50', 'framewise_accuracy', 'edit_distance']:
+                if metric_name in all_metrics:
+                    avg_value = sum(all_metrics[metric_name]) / len(all_metrics[metric_name])
+                    print(f"  avg_{metric_name}: {avg_value:.4f}")
+
+    def _update_summary_csvs(self):
+        """Update the summary CSV files with current results."""
+        # Create separate summaries for in-dist and OOD
+        for eval_type in ['indist', 'ood']:
+            summary_rows = []
+            eval_key = f'evaluation_{eval_type}'
+
+            for result in self.results:
+                if eval_key in result and result[eval_key]:
+                    # Extract metrics for each task
+                    for task_key, task_eval in result[eval_key].items():
+                        if isinstance(task_eval, dict):
+                            if 'status' in task_eval and task_eval['status'] == 'failed':
+                                continue
+
+                            row = {
+                                'ablation': result['ablation_name'],
+                                'task': task_key,
+                                'eval_type': eval_type,
+                                'status': result.get('status', 'unknown')
+                            }
+
+                            # Add metrics if available
+                            # Boundary F1 scores
+                            for tol in [1.0, 2.0, 3.0, 4.0, 5.0]:
+                                f1_key = f'f1@{tol}'
+                                if f1_key in task_eval:
+                                    row[f'F1@{tol}'] = task_eval[f1_key]
+
+                            # AP scores
+                            for tol in [1.0, 2.0, 3.0, 4.0, 5.0]:
+                                ap_key = f'ap@{tol}'
+                                if ap_key in task_eval:
+                                    row[f'AP@{tol}'] = task_eval[ap_key]
+
+                            # mAP
+                            if 'map' in task_eval:
+                                row['mAP'] = task_eval['map']
+
+                            # Segmental F1@IoU
+                            for iou_pct in [10, 25, 50]:
+                                seg_f1_key = f'seg_f1@{iou_pct}'
+                                if seg_f1_key in task_eval:
+                                    row[f'Seg-F1@{iou_pct}%'] = task_eval[seg_f1_key]
+
+                            # Edit distance
+                            if 'edit_distance' in task_eval:
+                                row['Edit-Dist'] = task_eval['edit_distance']
+                            if 'normalized_edit_distance' in task_eval:
+                                row['Norm-Edit-Dist'] = task_eval['normalized_edit_distance']
+
+                            # Framewise accuracy
+                            if 'framewise_accuracy' in task_eval:
+                                row['Acc'] = task_eval['framewise_accuracy']
+
+                            # Frame-level metrics
+                            for metric_name in ['precision', 'recall', 'f1_score', 'accuracy']:
+                                if metric_name in task_eval:
+                                    row[metric_name] = task_eval[metric_name]
+
+                            summary_rows.append(row)
+
+            if summary_rows:
+                df = pd.DataFrame(summary_rows)
+                csv_file = self.output_root / f'multi_task_ablation_summary_{eval_type}.csv'
+                df.to_csv(csv_file, index=False)
+
+    def generate_summary_report(self):
+        """Generate final summary report of all results."""
+        print(f"\n{'='*80}")
+        print(f"MULTI-TASK ABLATION STUDY FINAL SUMMARY")
+        print(f"{'='*80}\n")
+
+        # Save results to JSON
+        results_file = self.output_root / 'multi_task_ablation_results.json'
+        with open(results_file, 'w') as f:
+            json.dump(self.results, f, indent=2)
+        print(f"Saved detailed results to: {results_file}")
+
+        # Update summary CSVs one final time
+        self._update_summary_csvs()
+
+        # Create aggregate summary (mean across tasks for each ablation)
+        self._create_aggregate_summary()
+
+        # Display per-task summaries
+        for eval_type in ['indist', 'ood']:
+            csv_file = self.output_root / f'multi_task_ablation_summary_{eval_type}.csv'
+            if csv_file.exists():
+                df = pd.read_csv(csv_file)
+                print(f"\n{'='*80}")
+                print(f"{eval_type.upper()} Results Summary ({len(df)} task evaluations):")
+                print(f"{'='*80}")
+                print(df.to_string(index=False))
+                print(f"\nPer-task CSV: {csv_file}")
+
+        # Display aggregate summaries
+        print(f"\n{'='*80}")
+        print(f"AGGREGATE PERFORMANCE (Mean Across Tasks)")
+        print(f"{'='*80}\n")
+
+        for eval_type in ['indist', 'ood']:
+            agg_file = self.output_root / f'multi_task_ablation_aggregate_{eval_type}.csv'
+            if agg_file.exists():
+                df = pd.read_csv(agg_file)
+                print(f"\n{eval_type.upper()} Performance (averaged across {self._count_tasks(eval_type)} tasks):")
+                print("-" * 80)
+                print(df.to_string(index=False))
+                print(f"\nAggregate CSV: {agg_file}")
+
+        print(f"\n{'='*80}")
+        print(f"Multi-task ablation study complete!")
+        print(f"Results directory: {self.output_root}")
+        print(f"{'='*80}\n")
+
+    def _count_tasks(self, eval_type: str) -> int:
+        """Count number of tasks for a given evaluation type."""
+        if eval_type == 'indist':
+            return len(self.train_task_ids)
+        else:
+            return len(self.ood_task_ids)
+
+    def _create_aggregate_summary(self):
+        """Create aggregate summary with mean metrics across tasks for each ablation."""
+        for eval_type in ['indist', 'ood']:
+            # Load per-task summary
+            csv_file = self.output_root / f'multi_task_ablation_summary_{eval_type}.csv'
+            if not csv_file.exists():
+                continue
+
+            df = pd.read_csv(csv_file)
+            if df.empty:
+                continue
+
+            # Group by ablation and compute mean
+            metric_columns = [col for col in df.columns if col not in ['ablation', 'task', 'eval_type', 'status']]
+
+            agg_data = []
+            for ablation in df['ablation'].unique():
+                ablation_df = df[df['ablation'] == ablation]
+
+                row = {'ablation': ablation}
+                for col in metric_columns:
+                    if col in ablation_df.columns:
+                        values = ablation_df[col].dropna()
+                        if len(values) > 0:
+                            row[col] = values.mean()
+
+                agg_data.append(row)
+
+            # Create aggregate dataframe
+            if agg_data:
+                agg_df = pd.DataFrame(agg_data)
+
+                # Sort columns for better readability
+                # Priority order: F1 scores, Seg-F1, other metrics
+                ordered_cols = ['ablation']
+                f1_cols = sorted([c for c in agg_df.columns if c.startswith('F1@')])
+                seg_f1_cols = sorted([c for c in agg_df.columns if c.startswith('Seg-F1@')])
+                other_cols = sorted([c for c in agg_df.columns if c not in ordered_cols + f1_cols + seg_f1_cols])
+
+                ordered_cols.extend(f1_cols)
+                ordered_cols.extend(seg_f1_cols)
+                ordered_cols.extend(other_cols)
+
+                # Reorder columns
+                agg_df = agg_df[[c for c in ordered_cols if c in agg_df.columns]]
+
+                # Save aggregate summary
+                agg_file = self.output_root / f'multi_task_ablation_aggregate_{eval_type}.csv'
+                agg_df.to_csv(agg_file, index=False)
+
+                # Also save a combined comparison
+                if eval_type == 'indist':
+                    indist_agg_df = agg_df.copy()
+                    indist_agg_df.columns = ['ablation'] + [f'indist_{c}' for c in indist_agg_df.columns if c != 'ablation']
+                elif eval_type == 'ood':
+                    ood_agg_df = agg_df.copy()
+                    ood_agg_df.columns = ['ablation'] + [f'ood_{c}' for c in ood_agg_df.columns if c != 'ablation']
+
+        # Create combined comparison (in-dist vs OOD side-by-side)
+        indist_file = self.output_root / 'multi_task_ablation_aggregate_indist.csv'
+        ood_file = self.output_root / 'multi_task_ablation_aggregate_ood.csv'
+
+        if indist_file.exists() and ood_file.exists():
+            indist_df = pd.read_csv(indist_file)
+            ood_df = pd.read_csv(ood_file)
+
+            # Merge on ablation name
+            indist_df.columns = ['ablation'] + [f'indist_{c}' for c in indist_df.columns if c != 'ablation']
+            ood_df.columns = ['ablation'] + [f'ood_{c}' for c in ood_df.columns if c != 'ablation']
+
+            combined_df = pd.merge(indist_df, ood_df, on='ablation', how='outer')
+
+            # Save combined comparison
+            combined_file = self.output_root / 'multi_task_ablation_aggregate_comparison.csv'
+            combined_df.to_csv(combined_file, index=False)
+
+    def _load_completed_trials(self) -> set:
+        """Load information about completed trials from previous runs.
+
+        Returns:
+            Set of ablation_name for completed trials
+        """
+        completed_trials = set()
+
+        # Check if results file exists
+        results_file = self.output_root / 'multi_task_ablation_results.json'
+        if not results_file.exists():
+            return completed_trials
+
+        try:
+            with open(results_file, 'r') as f:
+                previous_results = json.load(f)
+
+            # Extract completed trials
+            for result in previous_results:
+                if result.get('status') == 'completed':
+                    ablation_name = result.get('ablation')
+                    if ablation_name:
+                        completed_trials.add(ablation_name)
+
+            # Also load into self.results for incremental updates
+            self.results = previous_results
+
+            if completed_trials:
+                print(f"\n{'='*80}")
+                print(f"FOUND {len(completed_trials)} COMPLETED TRIALS FROM PREVIOUS RUN")
+                print(f"{'='*80}")
+                for ablation_name in sorted(completed_trials):
+                    ablation_display = self.ABLATION_CONFIGS.get(ablation_name, {}).get('name', ablation_name)
+                    print(f"  ✓ {ablation_display}")
+                print(f"{'='*80}\n")
+
+        except Exception as e:
+            print(f"Warning: Could not load previous results: {e}")
+
+        return completed_trials
+
+    def run_all_ablations(
+        self,
+        ablation_names: List[str] = None,
+        num_parallel: int = None
+    ):
+        """Run all multi-task ablation studies.
+
+        Each ablation trains ONE model on ALL training tasks using 8 GPUs.
+        Results are evaluated on both in-distribution and OOD tasks.
+
+        Args:
+            ablation_names: List of ablation names (None = all)
+            num_parallel: Number of parallel jobs (None = unlimited, but each uses 8 GPUs!)
+        """
+        if ablation_names is None:
+            ablation_names = list(self.ABLATION_CONFIGS.keys())
+
+        print(f"\n{'='*80}")
+        print(f"RUNNING MULTI-TASK ABLATION STUDY")
+        print(f"{'='*80}")
+        print(f"Base config: {self.base_config_path}")
+        print(f"Training tasks: {self.train_task_ids} ({len(self.train_task_ids)} tasks)")
+        print(f"OOD tasks: {self.ood_task_ids} ({len(self.ood_task_ids)} tasks)")
+        print(f"Ablations: {ablation_names}")
+        print(f"Output root: {self.output_root}")
+        print(f"Quick test: {self.quick_test}")
+        print(f"GPUs per ablation: {self.num_gpus}")
+        print(f"Max parallel ablations: {num_parallel if num_parallel else 'unlimited'}")
+        print(f"{'='*80}\n")
+
+        # Load completed trials from previous runs
+        completed_trials = self._load_completed_trials()
+
+        # Filter out completed trials
+        trials_to_run = [name for name in ablation_names if name not in completed_trials]
+
+        if len(trials_to_run) < len(ablation_names):
+            skipped = set(ablation_names) - set(trials_to_run)
+            print(f"\n{'='*80}")
+            print(f"SKIPPING {len(skipped)} ALREADY COMPLETED TRIALS")
+            print(f"{'='*80}")
+            for ablation_name in sorted(skipped):
+                ablation_display = self.ABLATION_CONFIGS.get(ablation_name, {}).get('name', ablation_name)
+                print(f"  ⊘ {ablation_display}")
+            print(f"{'='*80}\n")
+
+        print(f"Total trials to run: {len(trials_to_run)}")
+
+        # If no trials to run, just generate the summary and exit
+        if len(trials_to_run) == 0:
+            print("\n⚠ All trials already completed! Generating summary report...")
+            self.generate_summary_report()
+            return
+
+        # Run trials with Ray Tune
+        if ray.is_initialized():
+            # Store current working directory for Ray workers
+            working_dir = os.getcwd()
+
+            trial_configs = []
+            for ablation_name in trials_to_run:
+                trial_configs.append({
+                    'ablation_name': ablation_name,
+                    'base_config_path': self.base_config_path,
+                    'train_task_ids': self.train_task_ids,
+                    'ood_task_ids': self.ood_task_ids,
+                    'output_root': str(self.output_root),
+                    'quick_test': self.quick_test,
+                    'num_gpus': self.num_gpus,
+                    'working_dir': working_dir
+                })
+
+            # Configure progress reporter
+            reporter = CLIReporter(
+                max_progress_rows=len(trial_configs) + 5,
+                metric_columns=["status", "ablation"]
+            )
+
+            # Create callback for incremental updates
+            incremental_callback = IncrementalResultsCallback(self)
+
+            # Run trials with Ray Tune
+            storage_path = str(Path(working_dir) / self.output_root)
+            print(f"Storage path: {storage_path}\n")
+
+            analysis = tune.run(
+                run_multi_task_trainable,
+                config=tune.grid_search(trial_configs),
+                resources_per_trial={"cpu": self.num_gpus, "gpu": self.num_gpus},
+                max_concurrent_trials=num_parallel,
+                verbose=1,
+                progress_reporter=reporter,
+                storage_path=storage_path,
+                name="multi_task_ablation_study",
+                log_to_file=True,
+                raise_on_failed_trial=False,
+                callbacks=[incremental_callback]
+            )
+
+            # Most results have been collected incrementally by the callback
+            # Just do a final check for any trials that might have been missed
+            print(f"\n{'='*80}")
+            print(f"FINALIZING RESULTS")
+            print(f"{'='*80}\n")
+
+            processed_trial_ids = incremental_callback.processed_trials
+
+            for trial in analysis.trials:
+                trial_id = trial.trial_id
+                if trial_id in processed_trial_ids:
+                    continue
+
+                if trial.status == "TERMINATED":
+                    ablation_name = trial.config['ablation_name']
+                    exp_name = self.ABLATION_CONFIGS[ablation_name]['modifications']['experiment_name']
+
+                    # Load evaluation results
+                    eval_dir = self.output_root / 'evaluations' / exp_name
+                    indist_results_file = eval_dir / 'indist_evaluation_results.json'
+                    ood_results_file = eval_dir / 'ood_evaluation_results.json'
+
+                    if indist_results_file.exists() and ood_results_file.exists():
+                        with open(indist_results_file, 'r') as f:
+                            indist_results = json.load(f)
+                        with open(ood_results_file, 'r') as f:
+                            ood_results = json.load(f)
+
+                        result = {
+                            'ablation': ablation_name,
+                            'ablation_name': self.ABLATION_CONFIGS[ablation_name]['name'],
+                            'description': self.ABLATION_CONFIGS[ablation_name]['description'],
+                            'config_path': str(self.output_root / 'configs' / f'{exp_name}.yaml'),
+                            'checkpoint_dir': f'./checkpoints/{exp_name}',
+                            'training': {'status': 'completed'},
+                            'evaluation_indist': indist_results,
+                            'evaluation_ood': ood_results,
+                            'status': 'completed'
+                        }
+
+                        self._update_incremental_results(result)
+                        print(f"✓ Completed (late): {result['ablation_name']}")
+                    else:
+                        print(f"✗ Missing results: {exp_name}")
+                elif trial.status == "ERROR":
+                    ablation_name = trial.config.get('ablation_name', 'unknown')
+                    print(f"✗ Failed: {ablation_name} - status: ERROR")
+        else:
+            # Run sequentially without Ray
+            for ablation_name in trials_to_run:
+                print(f"\n{'='*80}")
+                print(f"Running ablation: {ablation_name}")
+                print(f"{'='*80}\n")
+
+                result = self._run_single_ablation_instance(
+                    ablation_name=ablation_name,
+                    run_training=True,
+                    run_evaluation=True
+                )
+
+                self._update_incremental_results(result)
+
+        # Generate final summary report
+        self.generate_summary_report()
+
+
+def run_multi_task_trainable(config: Dict[str, Any]):
+    """Ray Tune trainable function for running a single multi-task ablation study.
+
+    Args:
+        config: Dictionary containing:
+            - ablation_name: Name of ablation to run
+            - base_config_path: Path to base configuration
+            - train_task_ids: Task IDs to train on
+            - ood_task_ids: OOD task IDs to evaluate on
+            - output_root: Root directory for results
+            - quick_test: Whether to run quick test
+            - num_gpus: Number of GPUs to use
+            - working_dir: Working directory to change to
+    """
+    ablation_name = config['ablation_name']
+    base_config_path = config['base_config_path']
+    train_task_ids = config['train_task_ids']
+    ood_task_ids = config['ood_task_ids']
+    output_root = config['output_root']
+    quick_test = config['quick_test']
+    num_gpus = config['num_gpus']
+    working_dir = config['working_dir']
+
+    # Change to the correct working directory
+    original_dir = os.getcwd()
+    os.chdir(working_dir)
+
+    print(f"\n{'='*80}")
+    print(f"Running multi-task ablation: {ablation_name}")
+    print(f"Training tasks: {train_task_ids}")
+    print(f"OOD tasks: {ood_task_ids}")
+    print(f"Working directory: {os.getcwd()}")
+    print(f"Allocated GPUs: {num_gpus}")
+    print(f"{'='*80}\n")
+
+    try:
+        # Create ablation study instance
+        study = MultiTaskAblationStudy(
+            base_config_path=base_config_path,
+            train_task_ids=train_task_ids,
+            ood_task_ids=ood_task_ids,
+            output_root=output_root,
+            quick_test=quick_test,
+            num_gpus=num_gpus
+        )
+
+        # Run the ablation
+        result = study._run_single_ablation_instance(
+            ablation_name=ablation_name,
+            run_training=True,
+            run_evaluation=True
+        )
+
+        print(f"\n✓ Completed multi-task ablation: {ablation_name}")
+
+    except Exception as e:
+        print(f"\n✗ Failed: {ablation_name}")
+        print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
+    finally:
+        # Restore original directory
+        os.chdir(original_dir)
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description='Run multi-task ablation study for boundary detection',
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+
+    parser.add_argument(
+        '--base-config',
+        type=str,
+        required=True,
+        help='Path to base configuration file'
+    )
+
+    parser.add_argument(
+        '--output-root',
+        type=str,
+        default='./multi_task_ablation_results',
+        help='Root directory for ablation results'
+    )
+
+    parser.add_argument(
+        '--ablations',
+        type=str,
+        nargs='+',
+        choices=list(MultiTaskAblationStudy.ABLATION_CONFIGS.keys()) + ['all'],
+        default=['all'],
+        help='Ablations to run'
+    )
+
+    parser.add_argument(
+        '--train-task-ids',
+        type=int,
+        nargs='+',
+        help='Task IDs to train on (default: use all from base config)'
+    )
+
+    parser.add_argument(
+        '--ood-task-ids',
+        type=int,
+        nargs='+',
+        help='OOD task IDs to evaluate on (default: auto-detect tasks >= 400)'
+    )
+
+    parser.add_argument(
+        '--quick-test',
+        action='store_true',
+        help='Quick test mode (fewer epochs, less data)'
+    )
+
+    parser.add_argument(
+        '--num-parallel',
+        type=int,
+        default=None,
+        help='Number of parallel jobs to run (default: unlimited, but each uses 8 GPUs!)'
+    )
+
+    parser.add_argument(
+        '--gpus-per-trial',
+        type=int,
+        default=8,
+        help='Number of GPUs per trial (default: 8)'
+    )
+
+    parser.add_argument(
+        '--ray-address',
+        type=str,
+        default=None,
+        help='Ray cluster address (default: start local cluster)'
+    )
+
+    return parser.parse_args()
+
+
+def main():
+    """Main function."""
+    args = parse_args()
+
+    # Initialize Ray
+    if not ray.is_initialized():
+        print(f"\nInitializing Ray...")
+        if args.ray_address:
+            ray.init(address=args.ray_address)
+            print(f"Connected to Ray cluster at {args.ray_address}")
+        else:
+            ray.init()
+            print(f"Started local Ray cluster")
+        print(f"Ray cluster resources: {ray.cluster_resources()}\n")
+
+    try:
+        # Load base config to get default task IDs
+        base_config = load_config(args.base_config)
+
+        # Get training task IDs
+        if args.train_task_ids:
+            train_task_ids = args.train_task_ids
+        else:
+            # Use from config or default to specified list
+            train_task_ids = [327, 352, 354, 356, 357, 358, 359, 360, 365, 366, 367,
+                             368, 372, 374, 375, 376, 377, 378, 380, 384, 385, 389, 390]
+
+        print(f"Using training task IDs: {train_task_ids}")
+
+        # Get OOD task IDs (will auto-detect if None)
+        ood_task_ids = args.ood_task_ids
+
+        # Initialize ablation study
+        study = MultiTaskAblationStudy(
+            base_config_path=args.base_config,
+            train_task_ids=train_task_ids,
+            ood_task_ids=ood_task_ids,
+            output_root=args.output_root,
+            quick_test=args.quick_test,
+            num_gpus=args.gpus_per_trial
+        )
+
+        # Get ablation names
+        ablation_names = args.ablations
+        if 'all' in ablation_names:
+            ablation_names = list(MultiTaskAblationStudy.ABLATION_CONFIGS.keys())
+
+        # Run ablations
+        study.run_all_ablations(
+            ablation_names=ablation_names,
+            num_parallel=args.num_parallel
+        )
+
+    finally:
+        # Shutdown Ray
+        if ray.is_initialized():
+            print("\nShutting down Ray...")
+            ray.shutdown()
+
+
+if __name__ == '__main__':
+    main()

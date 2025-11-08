@@ -108,3 +108,6 @@ data_task*
 full_dataset*
 ray_results/
 ablation_results/
+ablation_results*
+checkpoints/
+multi_task_ablation_results/

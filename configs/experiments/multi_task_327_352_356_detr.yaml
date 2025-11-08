@@ -10,7 +10,7 @@ model:
   # Basic settings
   vocab_size: 2048
   token_embed_dim: 600
-  num_dino_frames: 18
+  num_dino_frames: 9
   prediction_window_size: 18
 
   # Feature modalities
@@ -54,10 +54,10 @@ data:
   stride: 1
   fps: 2.0
   action_dim: 14
-  num_dino_frames: 18
+  num_dino_frames: 9
 
   # DataLoader (optimized batch size with gradient accumulation)
-  batch_size: 128  # Increased from 64 (using gradient accumulation for effective batch size of 512)
+  batch_size: 512  # Increased from 64 (using gradient accumulation for effective batch size of 512)
   num_workers: 16
   pin_memory: true
 
@@ -72,7 +72,7 @@ data:
   max_samples: null
 
 training:
-  num_epochs: 200  # DETR typically needs more epochs
+  num_epochs: 2000  # DETR typically needs more epochs
 
   # Learning rate (tuned via hyperparameter search)
   learning_rate: 0.0000506  # Tuned: 5.06351e-05 (from best trial)

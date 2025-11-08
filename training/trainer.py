@@ -124,7 +124,8 @@ class Trainer:
         val_loader: Optional[DataLoader] = None,
         num_epochs: int = 100,
         log_every: int = 10,
-        collect_plots_every: int = 3
+        collect_plots_every: int = 3,
+        start_epoch: int = 0
     ) -> Dict[str, List[float]]:
         """Train the model.
 
@@ -134,6 +135,7 @@ class Trainer:
             num_epochs: Number of epochs to train
             log_every: Log progress every N batches
             collect_plots_every: Collect trajectory data for plots every N epochs
+            start_epoch: Epoch to start training from (for resuming)
 
         Returns:
             Dictionary of training history (losses, metrics)
@@ -158,7 +160,7 @@ class Trainer:
             callback.on_train_begin(self)
 
         # Training loop
-        for epoch in range(num_epochs):
+        for epoch in range(start_epoch, num_epochs):
             if self.stop_training:
                 break
 

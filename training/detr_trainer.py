@@ -63,7 +63,8 @@ def train_detr(
     checkpoint_dir: str = './checkpoints',
     log_every: int = 10,
     is_main_process: bool = True,
-    rank: int = 0
+    rank: int = 0,
+    start_epoch: int = 0
 ):
     """Train DETR model with set-based supervision.
 
@@ -87,6 +88,7 @@ def train_detr(
         log_every: Log frequency (batches)
         is_main_process: Whether this is the main process
         rank: Process rank (for distributed training)
+        start_epoch: Epoch to start training from (for resuming)
     """
     if metric_tolerances is None:
         metric_tolerances = [1.0, 2.0, 3.0]  # Default tolerances in seconds
@@ -127,7 +129,7 @@ def train_detr(
     best_val_loss = float('inf')
     global_step = 0
 
-    for epoch in range(num_epochs):
+    for epoch in range(start_epoch, num_epochs):
         if is_main_process:
             print(f"\nEpoch {epoch+1}/{num_epochs}")
             print("=" * 80)

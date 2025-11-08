@@ -445,10 +445,12 @@ def main():
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         if scheduler and 'scheduler_state_dict' in checkpoint:
             scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-        start_epoch = checkpoint.get('epoch', 0)
+        # Checkpoint saves the last completed epoch, so resume from the next one
+        start_epoch = checkpoint.get('epoch', 0) + 1
 
         if is_main_process(rank):
-            print(f"Resumed from epoch {start_epoch}")
+            print(f"Resumed from checkpoint (last completed epoch: {checkpoint.get('epoch', 0)})")
+            print(f"Starting training from epoch {start_epoch}")
 
     # Create callbacks (only on main process to avoid duplicate logging)
     if is_main_process(rank):
@@ -531,7 +533,8 @@ def main():
                 checkpoint_dir=config.training.checkpoint_dir,
                 log_every=config.training.log_every,
                 is_main_process=is_main_process(rank),
-                rank=rank
+                rank=rank,
+                start_epoch=start_epoch
             )
 
             if is_main_process(rank):
@@ -585,7 +588,8 @@ def main():
                 val_loader=val_loader,
                 num_epochs=config.training.num_epochs,
                 log_every=config.training.log_every,
-                collect_plots_every=config.training.log_plots_every
+                collect_plots_every=config.training.log_plots_every,
+                start_epoch=start_epoch
             )
 
             if is_main_process(rank):
