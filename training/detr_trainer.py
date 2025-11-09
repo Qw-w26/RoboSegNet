@@ -38,6 +38,7 @@ class DETRTrainerWrapper:
         self.model = model
         self.optimizer = optimizer
         self.scheduler = scheduler
+        self.stop_training = False
 
     def get_model(self):
         """Get unwrapped model (handles DDP)."""
@@ -329,6 +330,12 @@ def train_detr(
             for callback in callbacks:
                 if hasattr(callback, 'on_epoch_end'):
                     callback.on_epoch_end(trainer_wrapper, epoch, callback_logs)
+
+        # Check if training should stop (early stopping)
+        if trainer_wrapper.stop_training:
+            if is_main_process:
+                print("\nTraining stopped early")
+            break
 
         # Periodic checkpoint
         if is_main_process and (epoch + 1) % 10 == 0:

@@ -6,23 +6,20 @@ MULTIPLE tasks simultaneously (multi-task training), then evaluates on both:
 - In-distribution tasks (the training tasks)
 - Out-of-distribution tasks (tasks >= 400)
 
-Key differences from run_ablation_study.py:
+Key features:
 - Each baseline trains ONE model on ALL training tasks (multi-task training)
-- Uses torchrun with 8 GPUs for distributed training
+- Single GPU training (no distributed training)
 - Evaluates on both in-distribution and out-of-distribution tasks
 - Reports separate metrics for in-dist vs OOD performance
 
-Training set: 327, 352, 354, 356, 357, 358, 359, 360, 365, 366, 367, 368,
-              372, 374, 375, 376, 377, 378, 380, 384, 385, 389, 390
-OOD test set: All tasks >= 400 (e.g., 410, 414, 421, 422, 424, 440)
+Training set: 374, 398, 327, 385, 389, 376, 375, 357, 358, 356, 354,
+              360, 372, 359, 378, 390, 377, 384
+OOD test set: 380, 424, 392
 
 Ablation studies (all trained on multiple tasks):
-1. Pure proprioceptive (no visual features)
-2. Pure visual (no proprioceptive features)
-3. MLP + MSE loss
-4. Pure DETR (no cross attention)
-5. Cross attention + MSE loss
-6. Multi-task baseline (default architecture)
+1. Pure proprioceptive (no visual features, MLP + MSE)
+2. Pure visual (no proprioceptive features, MLP + MSE)
+3. Multi-task baseline (default architecture)
 
 Output metrics:
 Boundary Detection Metrics:
@@ -35,25 +32,32 @@ Action Segmentation Metrics (Standard):
 - Edit-Dist (Segmental edit distance / Levenshtein distance)
 - Acc (Framewise accuracy)
 
+Checkpoint Management:
+- Checkpoints are saved every N epochs (configured via save_every in config)
+- If training is interrupted, the script will automatically resume from the
+  latest checkpoint when re-run
+- Training status is tracked via checkpoint files (final_model.pt indicates completion)
+- The script skips already-completed trials based on results JSON
+
 Usage:
-    # Run all ablations (each uses 8 GPUs)
+    # Run all ablations
     python scripts/run_multi_task_ablation.py --base-config configs/experiments/multi_task_327_352_356_detr.yaml
 
     # Run specific ablations
     python scripts/run_multi_task_ablation.py --base-config configs/experiments/multi_task_327_352_356_detr.yaml \
-        --ablations pure_proprio pure_visual mlp_mse
+        --ablations pure_proprio pure_visual
 
     # Quick test run (fewer epochs)
     python scripts/run_multi_task_ablation.py --base-config configs/experiments/multi_task_327_352_356_detr.yaml \
         --quick-test
 
-    # Limit parallelism (run 1 ablation at a time, each uses 8 GPUs)
+    # Run without Ray (sequential execution)
     python scripts/run_multi_task_ablation.py --base-config configs/experiments/multi_task_327_352_356_detr.yaml \
         --num-parallel 1
 
-    # Use 4 GPUs per trial instead of 8
-    python scripts/run_multi_task_ablation.py --base-config configs/experiments/multi_task_327_352_356_detr.yaml \
-        --gpus-per-trial 4
+    # Resume interrupted training:
+    # Simply re-run the same command - the script will automatically detect
+    # incomplete training runs and resume from the latest checkpoint
 
 Author: Claude Code
 Date: November 2025
@@ -78,6 +82,8 @@ from ray.tune.callback import Callback
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from config import load_config
+
+
 
 
 class IncrementalResultsCallback(Callback):
@@ -156,24 +162,30 @@ class MultiTaskAblationStudy:
                 'experiment_name': 'multi_task_ablation_baseline'
             }
         },
-        # 'pure_proprio': {
-        #     'name': 'Pure Proprioceptive',
-        #     'description': 'Only proprioceptive features, no visual input',
-        #     'modifications': {
-        #         'model.use_proprio': True,
-        #         'model.use_dino': False,
-        #         'experiment_name': 'multi_task_ablation_pure_proprio'
-        #     }
-        # },
-        # 'pure_visual': {
-        #     'name': 'Pure Visual',
-        #     'description': 'Only visual features, no proprioceptive input',
-        #     'modifications': {
-        #         'model.use_proprio': False,
-        #         'model.use_dino': True,
-        #         'experiment_name': 'multi_task_ablation_pure_visual'
-        #     }
-        # }
+        'pure_proprio': {
+            'name': 'Pure Proprioceptive',
+            'description': 'Only proprioceptive features, no visual input',
+            'modifications': {
+                'model.use_proprio': True,
+                'model.use_dino': False,
+                'model.architecture': 'mlp',
+                'training.loss_type': 'mse_raw',
+                'training.optimizer': 'adam',
+                'experiment_name': 'multi_task_ablation_pure_proprio'
+            }
+        },
+        'pure_visual': {
+            'name': 'Pure Visual',
+            'description': 'Only visual features, no proprioceptive input',
+            'modifications': {
+                'model.use_proprio': False,
+                'model.use_dino': True,
+                'model.architecture': 'mlp',
+                'training.loss_type': 'mse_raw',
+                'training.optimizer': 'adam',
+                'experiment_name': 'multi_task_ablation_pure_visual'
+            }
+        },
         # 'mlp_mse': {
         #     'name': 'MLP + MSE',
         #     'description': 'Simple MLP architecture with MSE loss',
@@ -181,7 +193,6 @@ class MultiTaskAblationStudy:
         #         'model.architecture': 'mlp',
         #         'training.loss_type': 'mse_raw',
         #         'training.optimizer': 'adam',
-        #         'data.batch_size': 128,
         #         'experiment_name': 'multi_task_ablation_mlp_mse'
         #     }
         # },
@@ -196,16 +207,6 @@ class MultiTaskAblationStudy:
         #         'experiment_name': 'multi_task_ablation_detr_no_cross_attn'
         #     }
         # },
-        # 'cross_attn_mse': {
-        #     'name': 'Cross Attention + MSE',
-        #     'description': 'Cross-modal transformer with MSE loss (no Hungarian matching)',
-        #     'modifications': {
-        #         'model.architecture': 'cross_modal_transformer',
-        #         'training.loss_type': 'mse_raw',
-        #         'training.optimizer': 'adamw',
-        #         'experiment_name': 'multi_task_ablation_cross_attn_mse'
-        #     }
-        # },
     }
 
     def __init__(
@@ -215,7 +216,7 @@ class MultiTaskAblationStudy:
         ood_task_ids: List[int] = None,
         output_root: str = './multi_task_ablation_results',
         quick_test: bool = False,
-        num_gpus: int = 8
+        num_gpus: int = 1
     ):
         """Initialize multi-task ablation study.
 
@@ -225,7 +226,7 @@ class MultiTaskAblationStudy:
             ood_task_ids: List of OOD task IDs to evaluate on (default: tasks >= 400)
             output_root: Root directory for ablation results
             quick_test: If True, use reduced epochs for quick testing
-            num_gpus: Number of GPUs to use for each training run
+            num_gpus: Number of GPUs to use for each training run (default: 1)
         """
         self.base_config_path = base_config_path
         self.base_config = load_config(base_config_path)
@@ -311,18 +312,97 @@ class MultiTaskAblationStudy:
         with open(output_path, 'w') as f:
             yaml.dump(config, f, default_flow_style=False, sort_keys=False)
 
+    def _check_training_status(self, checkpoint_dir: Path) -> Dict[str, Any]:
+        """Check if training is complete or can be resumed.
+
+        Args:
+            checkpoint_dir: Directory containing checkpoints
+
+        Returns:
+            Dictionary with:
+                - 'status': 'complete', 'resumable', or 'not_started'
+                - 'checkpoint_path': Path to resume from (if resumable)
+                - 'message': Status message
+        """
+        if not checkpoint_dir.exists():
+            return {
+                'status': 'not_started',
+                'checkpoint_path': None,
+                'message': 'No checkpoint directory found'
+            }
+
+        # Check if training completed (final_model.pt exists)
+        final_checkpoint = checkpoint_dir / 'final_model.pt'
+        if final_checkpoint.exists():
+            return {
+                'status': 'complete',
+                'checkpoint_path': str(final_checkpoint),
+                'message': 'Training already completed'
+            }
+
+        # Find latest checkpoint to resume from
+        latest_checkpoint = self._find_latest_checkpoint(checkpoint_dir)
+        if latest_checkpoint:
+            return {
+                'status': 'resumable',
+                'checkpoint_path': str(latest_checkpoint),
+                'message': f'Can resume from {latest_checkpoint.name}'
+            }
+
+        return {
+            'status': 'not_started',
+            'checkpoint_path': None,
+            'message': 'No valid checkpoints found'
+        }
+
+    def _find_latest_checkpoint(self, checkpoint_dir: Path) -> Path:
+        """Find the latest checkpoint in a directory.
+
+        Args:
+            checkpoint_dir: Directory containing checkpoints
+
+        Returns:
+            Path to latest checkpoint, or None if not found
+        """
+        if not checkpoint_dir.exists():
+            return None
+
+        # Look for periodic checkpoints (checkpoint_epoch_N.pt)
+        periodic_checkpoints = list(checkpoint_dir.glob('checkpoint_epoch_*.pt'))
+
+        if periodic_checkpoints:
+            # Sort by epoch number (extract from filename)
+            def get_epoch(path):
+                try:
+                    # Extract epoch number from "checkpoint_epoch_N.pt"
+                    return int(path.stem.split('_')[-1])
+                except (ValueError, IndexError):
+                    return -1
+
+            periodic_checkpoints.sort(key=get_epoch, reverse=True)
+            return periodic_checkpoints[0]
+
+        # If no periodic checkpoints, check for best_model.pt
+        best_checkpoint = checkpoint_dir / 'best_model.pt'
+        if best_checkpoint.exists():
+            return best_checkpoint
+
+        return None
+
     def run_training(
         self,
         config_path: Path,
         checkpoint_dir: Path,
-        num_gpus: int = 8
+        num_gpus: int = 1
     ) -> Dict[str, Any]:
-        """Run multi-GPU training with torchrun.
+        """Run single-GPU training.
+
+        Supports automatic resuming from checkpoints if training was interrupted.
 
         Args:
             config_path: Path to configuration file
             checkpoint_dir: Directory for checkpoints
-            num_gpus: Number of GPUs to use
+            num_gpus: Number of GPUs to use (default: 1)
 
         Returns:
             Training results dictionary
@@ -334,16 +414,40 @@ class MultiTaskAblationStudy:
         print(f"GPUs: {num_gpus}")
         print(f"{'='*80}\n")
 
-        # Construct torchrun command
+        # Check training status
+        status_info = self._check_training_status(checkpoint_dir)
+        print(f"Training status: {status_info['message']}")
+
+        # If training is complete, skip
+        if status_info['status'] == 'complete':
+            print("Training already completed, skipping...")
+            # Find best checkpoint
+            best_checkpoint = checkpoint_dir / 'best_model.pt'
+            final_checkpoint = checkpoint_dir / 'final_model.pt'
+
+            # Prefer best_model.pt, fallback to final_model.pt
+            checkpoint_path = best_checkpoint if best_checkpoint.exists() else final_checkpoint
+
+            return {
+                'status': 'completed',
+                'checkpoint': str(checkpoint_path)
+            }
+
+        # Construct python command (no torchrun)
         cmd = [
-            'torchrun',
-            f'--nproc_per_node={num_gpus}',
-            '--master_port=29500',
+            'python',
             'scripts/train.py',
             '--config', str(config_path)
         ]
 
+        # Add resume flag if we can resume from a checkpoint
+        if status_info['status'] == 'resumable':
+            resume_checkpoint = status_info['checkpoint_path']
+            print(f"Resuming training from: {resume_checkpoint}")
+            cmd.extend(['--resume', resume_checkpoint])
+
         # Run training
+        print(f"\nRunning command: {' '.join(cmd)}\n")
         result = subprocess.run(
             cmd,
             cwd=Path(__file__).parent.parent,
@@ -354,12 +458,23 @@ class MultiTaskAblationStudy:
             print(f"WARNING: Training failed for {config_path.stem}")
             return {'status': 'failed'}
 
-        # Find best checkpoint
+        # Find best checkpoint after training completes
         best_checkpoint = None
         if checkpoint_dir.exists():
-            checkpoints = list(checkpoint_dir.glob('best_*.pt'))
-            if checkpoints:
-                best_checkpoint = checkpoints[0]
+            # First try best_model.pt
+            best_model = checkpoint_dir / 'best_model.pt'
+            if best_model.exists():
+                best_checkpoint = best_model
+            else:
+                # Fallback to any best_*.pt files
+                checkpoints = list(checkpoint_dir.glob('best_*.pt'))
+                if checkpoints:
+                    best_checkpoint = checkpoints[0]
+                else:
+                    # Last resort: use final_model.pt
+                    final_model = checkpoint_dir / 'final_model.pt'
+                    if final_model.exists():
+                        best_checkpoint = final_model
 
         return {
             'status': 'completed',
@@ -823,12 +938,12 @@ class MultiTaskAblationStudy:
     ):
         """Run all multi-task ablation studies.
 
-        Each ablation trains ONE model on ALL training tasks using 8 GPUs.
+        Each ablation trains ONE model on ALL training tasks.
         Results are evaluated on both in-distribution and OOD tasks.
 
         Args:
             ablation_names: List of ablation names (None = all)
-            num_parallel: Number of parallel jobs (None = unlimited, but each uses 8 GPUs!)
+            num_parallel: Number of parallel jobs (None = sequential execution)
         """
         if ablation_names is None:
             ablation_names = list(self.ABLATION_CONFIGS.keys())
@@ -992,7 +1107,7 @@ def run_multi_task_trainable(config: Dict[str, Any]):
             - ood_task_ids: OOD task IDs to evaluate on
             - output_root: Root directory for results
             - quick_test: Whether to run quick test
-            - num_gpus: Number of GPUs to use
+            - num_gpus: Number of GPUs to use (default: 1)
             - working_dir: Working directory to change to
     """
     ablation_name = config['ablation_name']
@@ -1013,7 +1128,7 @@ def run_multi_task_trainable(config: Dict[str, Any]):
     print(f"Training tasks: {train_task_ids}")
     print(f"OOD tasks: {ood_task_ids}")
     print(f"Working directory: {os.getcwd()}")
-    print(f"Allocated GPUs: {num_gpus}")
+    print(f"GPUs: {num_gpus}")
     print(f"{'='*80}\n")
 
     try:
@@ -1100,15 +1215,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         '--num-parallel',
         type=int,
-        default=None,
-        help='Number of parallel jobs to run (default: unlimited, but each uses 8 GPUs!)'
+        default=8,
+        help='Number of parallel jobs to run (default: sequential execution)'
     )
 
     parser.add_argument(
         '--gpus-per-trial',
         type=int,
-        default=8,
-        help='Number of GPUs per trial (default: 8)'
+        default=1,
+        help='Number of GPUs per trial (default: 1)'
     )
 
     parser.add_argument(
@@ -1125,9 +1240,11 @@ def main():
     """Main function."""
     args = parse_args()
 
-    # Initialize Ray
-    if not ray.is_initialized():
-        print(f"\nInitializing Ray...")
+    # Initialize Ray only if needed (for parallel execution)
+    use_ray = args.num_parallel is not None and args.num_parallel > 1
+
+    if use_ray and not ray.is_initialized():
+        print(f"\nInitializing Ray for parallel execution...")
         if args.ray_address:
             ray.init(address=args.ray_address)
             print(f"Connected to Ray cluster at {args.ray_address}")
@@ -1135,6 +1252,8 @@ def main():
             ray.init()
             print(f"Started local Ray cluster")
         print(f"Ray cluster resources: {ray.cluster_resources()}\n")
+    elif not use_ray:
+        print(f"\nRunning in sequential mode (no Ray parallelization)\n")
 
     try:
         # Load base config to get default task IDs
@@ -1145,13 +1264,18 @@ def main():
             train_task_ids = args.train_task_ids
         else:
             # Use from config or default to specified list
-            train_task_ids = [327, 352, 354, 356, 357, 358, 359, 360, 365, 366, 367,
-                             368, 372, 374, 375, 376, 377, 378, 380, 384, 385, 389, 390]
+            train_task_ids = [374, 398, 327, 385, 389, 376, 375, 357, 358, 356, 354,
+                             360, 372, 359, 378, 390, 377, 384]
 
         print(f"Using training task IDs: {train_task_ids}")
 
-        # Get OOD task IDs (will auto-detect if None)
-        ood_task_ids = args.ood_task_ids
+        # Get OOD task IDs (default to [380, 424, 392])
+        if args.ood_task_ids:
+            ood_task_ids = args.ood_task_ids
+        else:
+            ood_task_ids = [380, 424, 392]
+
+        print(f"Using OOD task IDs: {ood_task_ids}")
 
         # Initialize ablation study
         study = MultiTaskAblationStudy(
@@ -1175,7 +1299,7 @@ def main():
         )
 
     finally:
-        # Shutdown Ray
+        # Shutdown Ray if it was initialized
         if ray.is_initialized():
             print("\nShutting down Ray...")
             ray.shutdown()

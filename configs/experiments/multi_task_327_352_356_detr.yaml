@@ -72,13 +72,7 @@ data:
   # - 380: 815
   # - 424: 916
   # - 392: 977
-  # - 410: 1091
-  # - 352: 1387
-  # - 421: 1654
-  # - 414: 2064
-  # - 422: 2089
-  # - 361: 2554
-  # - 362: 5666
+
 
   # Dataset parameters
   window_size: 18
@@ -88,7 +82,7 @@ data:
   num_dino_frames: 9
 
   # DataLoader (optimized batch size with gradient accumulation)
-  batch_size: 512  # Increased from 64 (using gradient accumulation for effective batch size of 512)
+  batch_size: 2048  # Increased from 64 (using gradient accumulation for effective batch size of 512)
   num_workers: 16
   pin_memory: true
 
