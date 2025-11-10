@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
 Generate LaTeX table from ablation summary CSV.
-The table will have tasks as column groups and methods as rows.
+By default, generates an aggregated table with task-weighted metrics.
 
 python scripts/generate_latex_table.py --output ablation_results/ablation_table.tex
+python scripts/generate_latex_table.py --per-task --output ablation_results/ablation_table_per_task.tex
 """
 
 import pandas as pd
@@ -11,17 +12,117 @@ import argparse
 from pathlib import Path
 
 
-def format_value(value, decimal_places=2, is_best=False):
+# Task weights based on number of trajectories
+TASK_WEIGHTS = {
+    374: 91,
+    440: 165,
+    398: 173,
+    327: 209,
+    385: 214,
+    389: 312,
+    376: 403,
+    375: 422,
+    357: 428,
+    358: 470,
+    356: 475,
+    354: 516,
+    360: 517,
+    372: 537,
+    359: 644,
+    378: 739,
+    390: 750,
+    377: 794,
+    384: 808,
+    380: 815,
+    424: 916,
+    392: 977,
+}
+
+
+def format_value(value, decimal_places=2, is_best=False, is_edit_dist=False):
     """Format numerical value for LaTeX table."""
     if pd.isna(value) or value == 0:
         return "--"
-    formatted = f"{value * 100:.{decimal_places}f}"
+    # Edit distance is not a percentage, so don't multiply by 100
+    if is_edit_dist:
+        formatted = f"{value:.{decimal_places}f}"
+    else:
+        formatted = f"{value * 100:.{decimal_places}f}"
     if is_best:
         formatted = f"\\textbf{{{formatted}}}"
     return formatted
 
 
-def generate_latex_table(csv_path, output_path=None, bold_best=True, use_colors=False):
+def compute_weighted_aggregates(df, task_weights):
+    """
+    Compute weighted aggregate metrics across tasks.
+
+    Args:
+        df: DataFrame with columns ['task', 'ablation', metric1, metric2, ...]
+        task_weights: Dictionary mapping task_id to number of trajectories
+
+    Returns:
+        DataFrame with aggregated metrics per ablation method
+    """
+    methods = df['ablation'].unique()
+
+    # Identify metric columns (everything except 'task' and 'ablation')
+    metric_columns = [col for col in df.columns if col not in ['task', 'ablation']]
+
+    aggregated_data = []
+
+    for method in methods:
+        method_data = df[df['ablation'] == method]
+        method_row = {'ablation': method}
+
+        for metric in metric_columns:
+            # Compute weighted average for this metric
+            weighted_sum = 0.0
+            total_weight = 0.0
+
+            for _, row in method_data.iterrows():
+                task_name = row['task']
+                metric_value = row[metric]
+
+                # Extract numeric task ID from task name (e.g., "task_374" -> 374)
+                if isinstance(task_name, str):
+                    try:
+                        # Remove "task_" prefix if present
+                        if task_name.startswith('task_'):
+                            task_id = int(task_name.replace('task_', ''))
+                        else:
+                            task_id = int(task_name)
+                    except ValueError:
+                        continue
+                else:
+                    task_id = int(task_name)
+
+                # Convert metric value to float and skip if invalid
+                try:
+                    metric_value = float(metric_value)
+                except (ValueError, TypeError):
+                    continue
+
+                # Skip if no weight available or metric is NaN
+                if task_id not in task_weights or pd.isna(metric_value):
+                    continue
+
+                weight = task_weights[task_id]
+                weighted_sum += metric_value * weight
+                total_weight += weight
+
+            # Compute weighted average
+            if total_weight > 0:
+                method_row[metric] = weighted_sum / total_weight
+            else:
+                method_row[metric] = None
+
+        aggregated_data.append(method_row)
+
+    return pd.DataFrame(aggregated_data)
+
+
+def generate_latex_table(csv_path, output_path=None, bold_best=True, use_colors=False, aggregate=True):
     """
     Generate LaTeX table from ablation summary CSV.
 
@@ -30,13 +131,20 @@ def generate_latex_table(csv_path, output_path=None, bold_best=True, use_colors=
         output_path: Optional path to save the LaTeX output
         bold_best: Whether to bold the best values in each column
         use_colors: Whether to use colored column groups
+        aggregate: Whether to generate aggregated table (default) or per-task table
     """
     # Read the CSV
     df = pd.read_csv(csv_path)
 
-    # Get unique tasks and methods
-    tasks = sorted(df['task'].unique())
-    methods = df['ablation'].unique()
+    if aggregate:
+        # Compute weighted aggregates across tasks
+        df = compute_weighted_aggregates(df, TASK_WEIGHTS)
+        tasks = ['Aggregated']  # Single column for aggregated metrics
+        methods = df['ablation'].unique()
+    else:
+        # Get unique tasks and methods
+        tasks = sorted(df['task'].unique())
+        methods = df['ablation'].unique()
 
     # Metrics to include - only specific ones requested
     metrics_to_include = ['F1@1.0', 'F1@2.0', 'F1@3.0', 'Seg-F1@50%', 'Acc', 'Edit-Dist']
@@ -46,16 +154,28 @@ def generate_latex_table(csv_path, output_path=None, bold_best=True, use_colors=
     # Find best values for each metric and task (if bold_best is enabled)
     best_values = {}
     if bold_best:
-        for task in tasks:
+        if aggregate:
+            # For aggregated table, find best across all methods
             for metric in metrics:
-                task_data = df[df['task'] == task]
                 # For Edit-Dist, lower is better; for others, higher is better
                 if metric == 'Edit-Dist':
-                    best_val = task_data[metric].min()
+                    best_val = df[metric].min()
                 else:
-                    best_val = task_data[metric].max()
+                    best_val = df[metric].max()
                 if pd.notna(best_val) and best_val > 0:
-                    best_values[(task, metric)] = best_val
+                    best_values[('Aggregated', metric)] = best_val
+        else:
+            # For per-task table, find best per task
+            for task in tasks:
+                for metric in metrics:
+                    task_data = df[df['task'] == task]
+                    # For Edit-Dist, lower is better; for others, higher is better
+                    if metric == 'Edit-Dist':
+                        best_val = task_data[metric].min()
+                    else:
+                        best_val = task_data[metric].max()
+                    if pd.notna(best_val) and best_val > 0:
+                        best_values[(task, metric)] = best_val
 
     # Start building LaTeX table
     latex_lines = []
@@ -175,22 +295,40 @@ def generate_latex_table(csv_path, output_path=None, bold_best=True, use_colors=
     for method in methods:
         row_parts = [method]
 
-        for task in tasks:
-            # Get the data for this method and task
-            task_data = df[(df['ablation'] == method) & (df['task'] == task)]
+        if aggregate:
+            # For aggregated table, get data directly from the aggregated dataframe
+            method_data = df[df['ablation'] == method]
 
-            if len(task_data) == 0:
-                # No data for this combination
+            if len(method_data) == 0:
+                # No data for this method
                 for metric in metrics:
                     row_parts.append("--")
             else:
                 for metric in metrics:
-                    value = task_data.iloc[0][metric]
+                    value = method_data.iloc[0][metric]
                     # Check if this is the best value
                     is_best = False
-                    if bold_best and (task, metric) in best_values:
-                        is_best = pd.notna(value) and abs(value - best_values[(task, metric)]) < 1e-6
-                    row_parts.append(format_value(value, is_best=is_best))
+                    if bold_best and ('Aggregated', metric) in best_values:
+                        is_best = pd.notna(value) and abs(value - best_values[('Aggregated', metric)]) < 1e-6
+                    row_parts.append(format_value(value, is_best=is_best, is_edit_dist=(metric == 'Edit-Dist')))
+        else:
+            # For per-task table, iterate through tasks
+            for task in tasks:
+                # Get the data for this method and task
+                task_data = df[(df['ablation'] == method) & (df['task'] == task)]
+
+                if len(task_data) == 0:
+                    # No data for this combination
+                    for metric in metrics:
+                        row_parts.append("--")
+                else:
+                    for metric in metrics:
+                        value = task_data.iloc[0][metric]
+                        # Check if this is the best value
+                        is_best = False
+                        if bold_best and (task, metric) in best_values:
+                            is_best = pd.notna(value) and abs(value - best_values[(task, metric)]) < 1e-6
+                        row_parts.append(format_value(value, is_best=is_best, is_edit_dist=(metric == 'Edit-Dist')))
 
         latex_lines.append("        " + " & ".join(row_parts) + r" \\")
 
@@ -231,7 +369,7 @@ def generate_latex_table(csv_path, output_path=None, bold_best=True, use_colors=
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Generate LaTeX table from ablation summary CSV"
+        description="Generate LaTeX table from ablation summary CSV. By default generates aggregated table."
     )
     parser.add_argument(
         '--input',
@@ -263,6 +401,11 @@ def main():
         # default = True,
         help='Use colored column groups'
     )
+    parser.add_argument(
+        '--per-task',
+        action='store_true',
+        help='Generate per-task table instead of aggregated table'
+    )
 
     args = parser.parse_args()
 
@@ -271,8 +414,10 @@ def main():
         print(f"Error: Input file not found: {args.input}")
         return
 
-    # Generate table
-    generate_latex_table(args.input, args.output, bold_best=args.bold_best, use_colors=args.use_colors)
+    # Generate table (aggregate by default unless --per-task is specified)
+    aggregate = not args.per_task
+    generate_latex_table(args.input, args.output, bold_best=args.bold_best,
+                         use_colors=args.use_colors, aggregate=aggregate)
 
 
 if __name__ == "__main__":
