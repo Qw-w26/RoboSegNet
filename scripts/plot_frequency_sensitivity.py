@@ -12,9 +12,14 @@ Each plot compares multi-modal (baseline) and pure (single-modality) models.
 
 import pandas as pd
 import matplotlib.pyplot as plt
+import seaborn as sns
 import numpy as np
 from pathlib import Path
 import re
+
+# Set seaborn style for presentation
+sns.set_style("whitegrid")
+sns.set_context("talk", font_scale=1.4)
 
 
 def extract_frequency(ablation_name: str) -> float:
@@ -105,8 +110,8 @@ def plot_frequency_relationship(
 
     plot_df = pd.DataFrame(data)
 
-    # Create plot
-    plt.figure(figsize=(10, 6))
+    # Create plot with larger figure size for presentations
+    plt.figure(figsize=(12, 8))
 
     # Plot multi-modal and pure separately
     for model_type in ['Multi-modal', 'Pure']:
@@ -115,25 +120,28 @@ def plot_frequency_relationship(
             # Sort by frequency
             subset = subset.sort_values('frequency')
 
-            # Plot with markers and lines
+            # Plot with markers and lines (larger for visibility)
             plt.plot(
                 subset['frequency'],
                 subset['metric'],
                 marker='o',
-                markersize=8,
+                markersize=14,
                 label=model_type,
-                linewidth=2
+                linewidth=3
             )
 
-    # Labels and title
+    # Labels (no title for cleaner presentation)
     freq_unit = 'Frames' if modality == 'visual' else 'Hz'
     eval_name = 'In-Distribution' if eval_type == 'indist' else 'Out-of-Distribution'
 
-    plt.xlabel(f'{modality.capitalize()} Frequency ({freq_unit})', fontsize=12)
-    plt.ylabel(metric, fontsize=12)
-    plt.title(f'{modality.capitalize()} Frequency Sensitivity ({eval_name})', fontsize=14, fontweight='bold')
+    plt.xlabel(f'{modality.capitalize()} Frequency ({freq_unit})', fontsize=22, fontweight='bold')
+    plt.ylabel(metric, fontsize=22, fontweight='bold')
 
-    plt.legend(title='Model Type', fontsize=10)
+    # Increase tick label sizes
+    plt.xticks(fontsize=18)
+    plt.yticks(fontsize=18)
+
+    plt.legend(fontsize=18, frameon=True, fancybox=True, shadow=True)
     plt.grid(True, alpha=0.3)
 
     # Tight layout
