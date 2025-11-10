@@ -65,6 +65,7 @@ class TrainingDatasetConfig:
         max_samples: Maximum number of samples to load (None for all)
         fps: Target FPS for data (should match preprocessing)
         num_dino_frames: Number of DINO frames to sample per window (evenly spaced)
+        proprio_subsample_rate: Target frequency for proprioceptive data (Hz). If None, uses detected frequency (~30Hz)
 
     Example:
         >>> config = TrainingDatasetConfig(
@@ -87,6 +88,9 @@ class TrainingDatasetConfig:
 
     # DINO features
     num_dino_frames: int = 3  # Number of DINO frames to sample per window
+
+    # Proprioceptive subsampling
+    proprio_subsample_rate: Optional[float] = None  # Target frequency (Hz) for proprioceptive data
 
     # Label smoothing
     label_smoother_type: str = 'gaussian'
@@ -146,9 +150,27 @@ class BoundaryDataset(Dataset):
             self.proprio_fps = config.fps  # Fallback
             print(f"Warning: No trajectories to detect frequency, using config fps: {self.proprio_fps} Hz")
 
+        # Apply proprioceptive subsampling if requested
+        if config.proprio_subsample_rate is not None:
+            if config.proprio_subsample_rate > self.proprio_fps:
+                print(f"Warning: Requested subsample rate ({config.proprio_subsample_rate}Hz) "
+                      f"is higher than detected frequency ({self.proprio_fps:.2f}Hz). "
+                      f"Using detected frequency.")
+                self.target_proprio_fps = self.proprio_fps
+                self.proprio_subsample_stride = 1
+            else:
+                self.target_proprio_fps = config.proprio_subsample_rate
+                self.proprio_subsample_stride = int(round(self.proprio_fps / self.target_proprio_fps))
+                print(f"Subsampling proprioception from {self.proprio_fps:.2f}Hz to {self.target_proprio_fps}Hz "
+                      f"(stride: {self.proprio_subsample_stride})")
+        else:
+            self.target_proprio_fps = self.proprio_fps
+            self.proprio_subsample_stride = 1
+
         # Calculate frequency multiplier for mapping window indices to proprio indices
-        self.freq_multiplier = int(round(self.proprio_fps / self.window_fps))
-        print(f"Window fps: {self.window_fps} Hz, Proprio fps: {self.proprio_fps:.2f} Hz, Multiplier: {self.freq_multiplier}x")
+        # Use target_proprio_fps instead of proprio_fps
+        self.freq_multiplier = int(round(self.target_proprio_fps / self.window_fps))
+        print(f"Window fps: {self.window_fps} Hz, Target Proprio fps: {self.target_proprio_fps:.2f} Hz, Multiplier: {self.freq_multiplier}x")
 
         # Calculate actual time covered by window
         time_window_s = config.window_size / self.window_fps
@@ -156,8 +178,9 @@ class BoundaryDataset(Dataset):
 
         # Calculate frame frequency for tokenizer (round to nearest integer)
         # The tokenizer requires that window_size = time_s * frame_frequency
-        tokenizer_frame_freq = int(round(self.proprio_fps))
-        print(f"Tokenizer frame frequency: {tokenizer_frame_freq} Hz (rounded from {self.proprio_fps:.2f} Hz)")
+        # Use target_proprio_fps to account for subsampling
+        tokenizer_frame_freq = int(round(self.target_proprio_fps))
+        print(f"Tokenizer frame frequency: {tokenizer_frame_freq} Hz (rounded from {self.target_proprio_fps:.2f} Hz)")
 
         # Calculate expected proprio samples per window that's compatible with tokenizer
         # Must be: window_size = time_s * frame_frequency (exactly)
@@ -381,20 +404,26 @@ class BoundaryDataset(Dataset):
         proprio_data: Dict,
         windows: List[Window]
     ) -> Dict[int, np.ndarray]:
-        """Extract proprioceptive features for windows.
+        """Extract proprioceptive features for windows with optional subsampling.
 
         Windows are at window_fps (DINO fps, e.g., 2 Hz), but we need to extract
-        proprio data at its native frequency (e.g., 30 Hz). We map window indices
-        by multiplying by the frequency multiplier.
+        proprio data at its target frequency (e.g., 30 Hz or subsampled to 15/5/2 Hz).
+        We map window indices by multiplying by the frequency multiplier.
         """
-        # Window begin_frames are at window_fps, map to proprio_fps
+        # Subsample joint positions if needed
+        joint_positions = proprio_data['joint_positions']
+        if self.proprio_subsample_stride > 1:
+            # Subsample to target frequency
+            joint_positions = joint_positions[::self.proprio_subsample_stride]
+
+        # Window begin_frames are at window_fps, map to target_proprio_fps
         begin_frames_at_window_fps = [window.begin_frame for window in windows]
         begin_frames_at_proprio_fps = [f * self.freq_multiplier for f in begin_frames_at_window_fps]
 
         # Extract proprio with mapped window size
-        # self.proprio_window_size is window_size * freq_multiplier
+        # self.proprio_window_size is calculated based on target_proprio_fps
         features = self.proprio_embedder.embed_frames(
-            proprio_data['joint_positions'],  # Proprio at native frequency
+            joint_positions,  # Subsampled proprio at target frequency
             begin_frames_at_proprio_fps,  # Mapped start indices
             self.proprio_window_size  # Mapped window size
         )
@@ -412,15 +441,23 @@ class BoundaryDataset(Dataset):
         intervals: List[Any],
         windows: List[Window]
     ) -> Dict[int, np.ndarray]:
-        """Create training labels with smoothing.
+        """Create training labels with smoothing, accounting for subsampling.
 
         Labels should be at window_fps (DINO fps) to match model predictions,
         not at proprio_fps. Each label represents the boundary probability at
         a window frame (2 Hz), not at every proprio sample.
         """
+        # Subsample timestamps if needed
+        if self.proprio_subsample_stride > 1:
+            timestamps = timestamps[::self.proprio_subsample_stride]
+
         # Extract boundary frame indices (start of each interval except first)
-        # These are at the original proprio frequency
+        # These are at the original proprio frequency, need to adjust for subsampling
         transition_indices = [interval.start_frame for interval in intervals[1:]]
+
+        # Adjust transition indices for subsampling
+        if self.proprio_subsample_stride > 1:
+            transition_indices = [idx // self.proprio_subsample_stride for idx in transition_indices]
 
         # Handle case with no transitions
         if len(transition_indices) == 0:
@@ -429,7 +466,7 @@ class BoundaryDataset(Dataset):
                 for window in windows
             }
 
-        # Apply label smoothing (labels are at proprio frequency)
+        # Apply label smoothing (labels are at target_proprio frequency after subsampling)
         smoothed_labels = self.label_smoother.smooth(timestamps, transition_indices)
 
         # Extract labels for each window

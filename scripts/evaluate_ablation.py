@@ -407,7 +407,8 @@ def evaluate_model_on_tasks(
                 label_smoother_peak_value=getattr(config.data, 'label_smoother_peak_value', 1.0),
                 action_dim=config.data.action_dim,
                 num_dino_frames=getattr(config.data, 'num_dino_frames', getattr(config.model, 'num_dino_frames', 3)),
-                max_samples=None
+                max_samples=None,
+                proprio_subsample_rate=getattr(config.data, 'proprio_subsample_rate', None)
             )
 
             val_dataset = LazyBoundaryDataset(val_trajectories, dataset_config)

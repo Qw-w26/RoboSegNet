@@ -111,3 +111,5 @@ ablation_results/
 ablation_results*
 checkpoints/
 multi_task_ablation_results/
+frequency_sensitivity_results/
+log.txt

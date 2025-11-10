@@ -558,7 +558,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         '--gpus-per-trial',
         type=float,
-        default=0.5,
+        default=1,
         help='Number of GPUs per trial (can be fractional for sharing)'
     )
 
@@ -572,7 +572,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         '--max-concurrent-trials',
         type=int,
-        default=32,
+        default=8,
         help='Maximum number of concurrent trials'
     )
 
@@ -676,7 +676,7 @@ def get_search_space(base_config_path: str, tier: str = 'full') -> Dict[str, Any
         'weight_decay': tune.loguniform(1e-5, 1e-3),
 
         # Batch size: smaller for DETR due to transformer memory requirements
-        'batch_size': tune.choice([32, 64, 128, 256]),  # Much smaller than baseline
+        'batch_size': tune.choice([1024]),  # Much smaller than baseline
 
         # Warmup steps: critical for DETR training stability
         'warmup_steps': tune.choice([500, 1000, 2000, 3000]),

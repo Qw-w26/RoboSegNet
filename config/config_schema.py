@@ -192,6 +192,10 @@ class DataConfig:
     # DETR-specific
     target_format: str = 'dense'  # 'dense' or 'set_based' (for DETR)
 
+    # Proprioceptive subsampling (for frequency ablation)
+    proprio_subsample_rate: Optional[float] = None  # Target proprio frequency (Hz)
+                                                     # If None, uses detected frequency (~30Hz)
+
     # Processing
     ray_num_workers: int = 4
     max_samples: Optional[int] = None

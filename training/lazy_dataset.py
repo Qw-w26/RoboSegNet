@@ -56,15 +56,37 @@ class LazyBoundaryDataset(Dataset):
             dt = np.diff(timestamps)
             median_dt = np.median(dt)
             self.proprio_fps = float(1.0 / median_dt) if median_dt > 0 else 30.0
+            print(f"Detected proprioception frequency: {self.proprio_fps:.2f} Hz")
         else:
             self.proprio_fps = config.fps
+            print(f"Warning: No trajectories to detect frequency, using config fps: {self.proprio_fps} Hz")
 
-        self.freq_multiplier = int(round(self.proprio_fps / self.window_fps))
+        # Apply proprioceptive subsampling if requested
+        if config.proprio_subsample_rate is not None:
+            if config.proprio_subsample_rate > self.proprio_fps:
+                print(f"Warning: Requested subsample rate ({config.proprio_subsample_rate}Hz) "
+                      f"is higher than detected frequency ({self.proprio_fps:.2f}Hz). "
+                      f"Using detected frequency.")
+                self.target_proprio_fps = self.proprio_fps
+                self.proprio_subsample_stride = 1
+            else:
+                self.target_proprio_fps = config.proprio_subsample_rate
+                self.proprio_subsample_stride = int(round(self.proprio_fps / self.target_proprio_fps))
+                print(f"Subsampling proprioception from {self.proprio_fps:.2f}Hz to {self.target_proprio_fps}Hz "
+                      f"(stride: {self.proprio_subsample_stride})")
+        else:
+            self.target_proprio_fps = self.proprio_fps
+            self.proprio_subsample_stride = 1
+
+        # Calculate frequency multiplier using target proprio fps
+        self.freq_multiplier = int(round(self.target_proprio_fps / self.window_fps))
+        print(f"Window fps: {self.window_fps} Hz, Target Proprio fps: {self.target_proprio_fps:.2f} Hz, Multiplier: {self.freq_multiplier}x")
 
         # Calculate window parameters
         time_window_s = config.window_size / self.window_fps
-        tokenizer_frame_freq = int(round(self.proprio_fps))
+        tokenizer_frame_freq = int(round(self.target_proprio_fps))
         self.proprio_window_size = int(time_window_s * tokenizer_frame_freq)
+        print(f"Proprio samples per window: {self.proprio_window_size} ({time_window_s:.1f}s * {tokenizer_frame_freq}Hz)")
 
         if self.proprio_window_size % tokenizer_frame_freq != 0:
             self.proprio_window_size = (self.proprio_window_size // tokenizer_frame_freq) * tokenizer_frame_freq
@@ -159,16 +181,22 @@ class LazyBoundaryDataset(Dataset):
 
         # Extract proprio features
         proprio = traj.proprio
+
+        # Subsample joint positions if needed
+        joint_positions = proprio.joint_position
+        if self.proprio_subsample_stride > 1:
+            joint_positions = joint_positions[::self.proprio_subsample_stride]
+
         begin_proprio = window.begin_frame * self.freq_multiplier
 
         # Use cached tokenization if available
-        cache_key = (traj_idx, begin_proprio)
+        cache_key = (traj_idx, begin_proprio, self.proprio_subsample_stride)
         if not hasattr(self, '_proprio_cache'):
             self._proprio_cache = {}
 
         if cache_key not in self._proprio_cache:
             proprio_tokens = self.proprio_embedder.embed_frames(
-                proprio.joint_position,
+                joint_positions,
                 [begin_proprio],
                 self.proprio_window_size
             )[begin_proprio]
@@ -188,7 +216,14 @@ class LazyBoundaryDataset(Dataset):
         elif timestamps[0] > 1e6:
             timestamps = timestamps / 1e3
 
+        # Subsample timestamps if needed
+        if self.proprio_subsample_stride > 1:
+            timestamps = timestamps[::self.proprio_subsample_stride]
+
+        # Extract transition indices and adjust for subsampling
         transition_indices = [interval.start_frame for interval in intervals[1:]]
+        if self.proprio_subsample_stride > 1:
+            transition_indices = [idx // self.proprio_subsample_stride for idx in transition_indices]
 
         if len(transition_indices) == 0:
             labels = np.zeros(self.config.window_size)
