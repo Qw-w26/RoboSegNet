@@ -16,6 +16,14 @@ from .boundary_detr import (
     BoundaryDETRConfig,
     create_boundary_detr
 )
+from .ms_tcn import (
+    BoundaryMSTCN,
+    build_boundary_mstcn
+)
+from .asformer import (
+    BoundaryASFormer,
+    build_boundary_asformer
+)
 from .detr_loss import (
     HungarianMatcher,
     SetCriterion,
@@ -102,6 +110,88 @@ def create_model(config, device='cuda' if torch.cuda.is_available() else 'cpu'):
 
         model = create_boundary_detr(config=config, device=device)
 
+    elif architecture == 'ms_tcn':
+        # Create MS-TCN model
+        # First get the full config to access ms_tcn parameters at top level
+        full_config_dict = dict(config.items()) if hasattr(config, 'items') else vars(config)
+
+        # Get MS-TCN hyperparameters from top-level config (not under model)
+        ms_tcn_config = full_config_dict.get('ms_tcn', {})
+        num_stages = ms_tcn_config.get('num_stages', 2)
+        num_layers = ms_tcn_config.get('num_layers', 5)
+        num_f_maps = ms_tcn_config.get('num_f_maps', 64)
+
+        # Convert to ModelConfig (MS-TCN uses same config as MLP)
+        if not isinstance(config, ModelConfig):
+            model_config_keys = {
+                'vocab_size', 'token_embed_dim', 'dino_feature_dim',
+                'hidden_dims', 'prediction_window_size',
+                'transformer_dropout', 'embedding_dropout',
+                'dino_encoder_dropout', 'mlp_dropout', 'feature_noise_std',
+                'use_proprio', 'use_dino', 'fusion_mode'
+            }
+
+            # If config has a 'model' key, use that for model-specific params
+            if 'model' in full_config_dict and isinstance(full_config_dict['model'], dict):
+                model_dict = full_config_dict['model']
+                filtered_config = {k: v for k, v in model_dict.items() if k in model_config_keys}
+            else:
+                filtered_config = {k: v for k, v in full_config_dict.items() if k in model_config_keys}
+
+            config = ModelConfig(**filtered_config)
+
+        model = build_boundary_mstcn(
+            config=config,
+            num_stages=num_stages,
+            num_layers=num_layers,
+            num_f_maps=num_f_maps,
+            device=device
+        )
+
+    elif architecture == 'asformer':
+        # Create ASFormer model
+        # First get the full config to access asformer parameters at top level
+        full_config_dict = dict(config.items()) if hasattr(config, 'items') else vars(config)
+
+        # Get ASFormer hyperparameters from top-level config (not under model)
+        asformer_config = full_config_dict.get('asformer', {})
+        num_decoder_stages = asformer_config.get('num_decoder_stages', 3)
+        num_encoder_layers = asformer_config.get('num_encoder_layers', 6)
+        num_decoder_layers = asformer_config.get('num_decoder_layers', 3)
+        num_f_maps = asformer_config.get('num_f_maps', 64)
+        num_heads = asformer_config.get('num_heads', 4)
+        attention_type = asformer_config.get('attention_type', 'normal')
+
+        # Convert to ModelConfig (ASFormer uses same config as MLP)
+        if not isinstance(config, ModelConfig):
+            model_config_keys = {
+                'vocab_size', 'token_embed_dim', 'dino_feature_dim',
+                'hidden_dims', 'prediction_window_size',
+                'transformer_dropout', 'embedding_dropout',
+                'dino_encoder_dropout', 'mlp_dropout', 'feature_noise_std',
+                'use_proprio', 'use_dino', 'fusion_mode'
+            }
+
+            # If config has a 'model' key, use that for model-specific params
+            if 'model' in full_config_dict and isinstance(full_config_dict['model'], dict):
+                model_dict = full_config_dict['model']
+                filtered_config = {k: v for k, v in model_dict.items() if k in model_config_keys}
+            else:
+                filtered_config = {k: v for k, v in full_config_dict.items() if k in model_config_keys}
+
+            config = ModelConfig(**filtered_config)
+
+        model = build_boundary_asformer(
+            config=config,
+            num_decoder_stages=num_decoder_stages,
+            num_encoder_layers=num_encoder_layers,
+            num_decoder_layers=num_decoder_layers,
+            num_f_maps=num_f_maps,
+            num_heads=num_heads,
+            attention_type=attention_type,
+            device=device
+        )
+
     else:
         # Default to MLP
         if not isinstance(config, ModelConfig):
@@ -127,11 +217,15 @@ __all__ = [
     'BoundaryPredictionMLP',
     'BoundaryPredictionTransformer',
     'BoundaryDETR',
+    'BoundaryMSTCN',
+    'BoundaryASFormer',
     'ModelConfig',
     'TransformerModelConfig',
     'BoundaryDETRConfig',
     'create_model',
     'create_boundary_detr',
+    'build_boundary_mstcn',
+    'build_boundary_asformer',
     'collate_dict',
     'TinyFASTEncoder',
     'DinoFeatureEncoder',

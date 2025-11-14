@@ -378,6 +378,8 @@ class ExperimentConfig:
     data: DataConfig = field(default_factory=DataConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
     wandb: WandBConfig = field(default_factory=WandBConfig)
+    ms_tcn: Dict[str, Any] = field(default_factory=dict)  # Optional MS-TCN hyperparameters
+    asformer: Dict[str, Any] = field(default_factory=dict)  # Optional ASFormer hyperparameters
 
     def __post_init__(self):
         """Ensure nested configs are proper dataclass instances."""
@@ -389,6 +391,10 @@ class ExperimentConfig:
             self.training = TrainingConfig(**self.training)
         if isinstance(self.wandb, dict):
             self.wandb = WandBConfig(**self.wandb)
+        if not isinstance(self.ms_tcn, dict):
+            self.ms_tcn = {}
+        if not isinstance(self.asformer, dict):
+            self.asformer = {}
 
         # Sync vocab_size between model and data
         if self.model.vocab_size != self.data.vocab_size:

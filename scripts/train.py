@@ -434,7 +434,7 @@ def main():
         if is_main_process(rank):
             print(f"\nLoading checkpoint from {args.resume}")
         # Load checkpoint on all ranks
-        checkpoint = torch.load(args.resume, map_location=device)
+        checkpoint = torch.load(args.resume, map_location=device, weights_only=False)
 
         # Load model state (handle DDP wrapper)
         if is_distributed:
@@ -545,6 +545,22 @@ def main():
                 print(f"Experiment: {config.experiment_name}")
 
         finally:
+            # Cleanup dataloaders to properly shut down worker processes
+            try:
+                if hasattr(train_loader, '_iterator') and train_loader._iterator is not None:
+                    train_loader._iterator._shutdown_workers()
+                del train_loader
+            except:
+                pass
+
+            try:
+                if val_loader is not None:
+                    if hasattr(val_loader, '_iterator') and val_loader._iterator is not None:
+                        val_loader._iterator._shutdown_workers()
+                    del val_loader
+            except:
+                pass
+
             # Cleanup distributed training
             cleanup_distributed()
 
@@ -606,6 +622,22 @@ def main():
                 print(f"Experiment: {config.experiment_name}")
 
         finally:
+            # Cleanup dataloaders to properly shut down worker processes
+            try:
+                if hasattr(train_loader, '_iterator') and train_loader._iterator is not None:
+                    train_loader._iterator._shutdown_workers()
+                del train_loader
+            except:
+                pass
+
+            try:
+                if val_loader is not None:
+                    if hasattr(val_loader, '_iterator') and val_loader._iterator is not None:
+                        val_loader._iterator._shutdown_workers()
+                    del val_loader
+            except:
+                pass
+
             # Cleanup distributed training
             cleanup_distributed()
 

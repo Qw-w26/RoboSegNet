@@ -10,7 +10,7 @@ model:
   # Basic settings
   vocab_size: 2048
   token_embed_dim: 600
-  num_dino_frames: 9
+  num_dino_frames: 18
   prediction_window_size: 18
 
   # Feature modalities
@@ -82,7 +82,7 @@ data:
   num_dino_frames: 9
 
   # DataLoader (optimized batch size with gradient accumulation)
-  batch_size: 2048  # Increased from 64 (using gradient accumulation for effective batch size of 512)
+  batch_size: 4096  # Increased from 64 (using gradient accumulation for effective batch size of 512)
   num_workers: 16
   pin_memory: true
 
@@ -97,10 +97,10 @@ data:
   max_samples: null
 
 training:
-  num_epochs: 2000  # DETR typically needs more epochs
+  num_epochs: 30  # DETR typically needs more epochs
 
   # Learning rate (tuned via hyperparameter search)
-  learning_rate: 0.0000506  # Tuned: 5.06351e-05 (from best trial)
+  learning_rate: 0.00005  # Tuned: 5.06351e-05 (from best trial)
   weight_decay: 0.000471  # Tuned: 0.000470546 (from best trial)
   optimizer: adamw  # AdamW recommended for transformers
 
@@ -128,7 +128,7 @@ training:
   matcher_cost_confidence: 4.65  # Tuned: 4.64562 (from best trial)
 
   # Metrics (for evaluation)
-  confidence_threshold: 0.5  # Threshold for filtering predictions
+  confidence_threshold: 0.1  # Threshold for filtering predictions
   # boundary_tolerance: 2.0  # Tolerance in frames for matching (±2 frames)
   metric_tolerances: [1.0, 2.0, 3.0]
   # mAP computation settings

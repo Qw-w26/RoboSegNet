@@ -136,6 +136,18 @@ def generate_latex_table(csv_path, output_path=None, bold_best=True, use_colors=
     # Read the CSV
     df = pd.read_csv(csv_path)
 
+    # Rename columns to match expected names
+    column_mapping = {}
+    if 'method' in df.columns and 'ablation' not in df.columns:
+        column_mapping['method'] = 'ablation'
+    if 'task_id' in df.columns and 'task' not in df.columns:
+        column_mapping['task_id'] = 'task'
+    if 'Framewise-Acc' in df.columns and 'Acc' not in df.columns:
+        column_mapping['Framewise-Acc'] = 'Acc'
+
+    if column_mapping:
+        df = df.rename(columns=column_mapping)
+
     if aggregate:
         # Compute weighted aggregates across tasks
         df = compute_weighted_aggregates(df, TASK_WEIGHTS)

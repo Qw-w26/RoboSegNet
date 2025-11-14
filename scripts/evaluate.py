@@ -202,7 +202,7 @@ def load_model_from_checkpoint(
     model = create_model(model_config, device=device)
 
     # Load checkpoint
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
 
     # Load state dict
     if 'model_state_dict' in checkpoint:
