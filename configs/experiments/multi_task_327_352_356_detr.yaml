@@ -19,11 +19,11 @@ model:
 
   # Visual encoder settings
   visual_hidden_dim: 256
-  visual_dropout: 0.109  # Tuned: 0.108969 (from best trial)
+  visual_dropout: 0.139  # Tuned: 0.138580 (from Nov 2024 tuning, val_f1=0.2834)
 
   # Cross-modal attention settings
   cross_modal_dim: 512
-  attention_dropout: 0.113  # Tuned: 0.112917 (from best trial)
+  attention_dropout: 0.090  # Tuned: 0.090071 (from Nov 2024 tuning, val_f1=0.2834)
   num_attention_heads: 8
 
   # DETR-specific settings
@@ -31,7 +31,7 @@ model:
   num_encoder_layers: 6
   num_decoder_layers: 6
   num_boundary_queries: 9  # Max 9 boundaries in 18-frame window
-  detr_dropout: 0.113  # Tuned: 0.112982 (from best trial)
+  detr_dropout: 0.298  # Tuned: 0.297792 (from Nov 2024 tuning, val_f1=0.2834)
   detr_feedforward_dim: 2048
 
   # Legacy settings (for TinyFASTEncoder)
@@ -82,7 +82,7 @@ data:
   num_dino_frames: 9
 
   # DataLoader (optimized batch size with gradient accumulation)
-  batch_size: 2048  # Increased from 64 (using gradient accumulation for effective batch size of 512)
+  batch_size: 1024  # Tuned: 1024 (from Nov 2024 tuning, val_f1=0.2834)
   num_workers: 16
   pin_memory: true
 
@@ -100,12 +100,12 @@ training:
   num_epochs: 2000  # DETR typically needs more epochs
 
   # Learning rate (tuned via hyperparameter search)
-  learning_rate: 0.0000506  # Tuned: 5.06351e-05 (from best trial)
-  weight_decay: 0.000471  # Tuned: 0.000470546 (from best trial)
+  learning_rate: 0.000415  # Tuned: 0.000414934 (from Nov 2024 tuning, val_f1=0.2834)
+  weight_decay: 0.000497  # Tuned: 0.000497306 (from Nov 2024 tuning, val_f1=0.2834)
   optimizer: adamw  # AdamW recommended for transformers
 
   # Warmup (tuned - shorter warmup performs better)
-  warmup_steps: 500  # Tuned: 500 (from best trial, was 2000)
+  warmup_steps: 1000  # Tuned: 1000 (from Nov 2024 tuning, val_f1=0.2834)
   warmup_start_lr: 0.0000001  # 1e-7
 
   # Scheduler
@@ -114,9 +114,9 @@ training:
 
   # DETR Loss settings (tuned via hyperparameter search)
   loss_type: "set_criterion"  # Use Hungarian matching loss
-  loss_position_weight: 4.41  # Tuned: 4.41297 (from best trial)
-  loss_confidence_weight: 1.40  # Tuned: 1.40385 (from best trial)
-  loss_eos_coef: 0.140  # Tuned: 0.139736 (from best trial, higher = less upweighting)
+  loss_position_weight: 5.12  # Tuned: 5.118784 (from Nov 2024 tuning, val_f1=0.2834)
+  loss_confidence_weight: 2.06  # Tuned: 2.063161 (from Nov 2024 tuning, val_f1=0.2834)
+  loss_eos_coef: 0.093  # Tuned: 0.092811 (from Nov 2024 tuning, val_f1=0.2834, lower = more upweighting)
 
   # Optional: Use focal loss for confidence (helps with class imbalance)
   use_focal_loss: false
@@ -124,8 +124,8 @@ training:
   loss_focal_gamma: 2.0
 
   # Hungarian matcher costs (tuned via hyperparameter search)
-  matcher_cost_position: 4.10  # Tuned: 4.10266 (from best trial)
-  matcher_cost_confidence: 4.65  # Tuned: 4.64562 (from best trial)
+  matcher_cost_position: 9.45  # Tuned: 9.446225 (from Nov 2024 tuning, val_f1=0.2834)
+  matcher_cost_confidence: 2.70  # Tuned: 2.699667 (from Nov 2024 tuning, val_f1=0.2834)
 
   # Metrics (for evaluation)
   confidence_threshold: 0.5  # Threshold for filtering predictions
@@ -135,9 +135,9 @@ training:
   confidence_thresholds_for_map: [0.3, 0.4, 0.5]
 
   # Regularization (tuned via hyperparameter search)
-  gradient_clip_val: 0.053  # Tuned: 0.0532533 (from best trial, gentler clipping)
+  gradient_clip_val: 0.230  # Tuned: 0.230197 (from Nov 2024 tuning, val_f1=0.2834)
   gradient_clip_type: "norm"  # Clip by global norm
-  gradient_accumulation_steps: 4  # Accumulate gradients over 4 steps (effective batch size = 128 * 4 = 512)
+  gradient_accumulation_steps: 4  # Accumulate gradients over 4 steps (effective batch size = 1024 * 4 = 4096)
   use_amp: true  # Mixed precision for efficiency
 
   # Checkpointing

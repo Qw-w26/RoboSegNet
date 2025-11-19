@@ -389,8 +389,8 @@ def evaluate_model_on_tasks(
         try:
             # Load task data
             print(f"Loading data for task {task_id}...")
-            val_trajectories = load_multi_task_split(
-                'val',
+            test_trajectories = load_multi_task_split(
+                'test',
                 task_ids=[task_id],
                 meta_dir=config.data.meta_dir
             )
@@ -411,14 +411,14 @@ def evaluate_model_on_tasks(
                 proprio_subsample_rate=getattr(config.data, 'proprio_subsample_rate', None)
             )
 
-            val_dataset = LazyBoundaryDataset(val_trajectories, dataset_config)
+            test_dataset = LazyBoundaryDataset(test_trajectories, dataset_config)
 
-            print(f"Dataset size: {len(val_dataset)}")
+            print(f"Dataset size: {len(test_dataset)}")
 
             # Create dataloader
             collate_fn = collate_detr_batch if is_detr else collate_dict
-            val_loader = DataLoader(
-                val_dataset,
+            test_loader = DataLoader(
+                test_dataset,
                 batch_size=config.data.batch_size,
                 shuffle=False,
                 num_workers=config.data.num_workers,
@@ -431,7 +431,7 @@ def evaluate_model_on_tasks(
             if is_detr:
                 task_metrics = evaluate_detr_model(
                     model=model,
-                    dataloader=val_loader,
+                    dataloader=test_loader,
                     device=device,
                     window_size=config.model.prediction_window_size,
                     metric_tolerances=config.training.metric_tolerances,
@@ -441,7 +441,7 @@ def evaluate_model_on_tasks(
             else:
                 task_metrics = evaluate_mlp_model(
                     model=model,
-                    dataloader=val_loader,
+                    dataloader=test_loader,
                     device=device,
                     metric_tolerances=config.training.metric_tolerances,
                     classification_threshold=getattr(config.training, 'classification_threshold', 0.5)
