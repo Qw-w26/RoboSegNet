@@ -217,5 +217,5 @@ Potential improvements:
 ---
 
 **Created**: October 25, 2025
-**Author**: Claude Code
+
 **Version**: 2.0 (trajectory-based)

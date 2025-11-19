@@ -1,7 +1,7 @@
-# Multi-task experiment with Boundary DETR Architecture
-# Set-based boundary detection with learned queries and Hungarian matching
+# Multi-task Boundary DETR Configuration
+# Tuned hyperparameters from November 2024 tuning (val_f1=0.2834)
 
-experiment_name: multi_task_327_352_356_detr
+experiment_name: multi_task_detr
 
 model:
   # Architecture type
@@ -19,19 +19,19 @@ model:
 
   # Visual encoder settings
   visual_hidden_dim: 256
-  visual_dropout: 0.139  # Tuned: 0.138580 (from Nov 2024 tuning, val_f1=0.2834)
+  visual_dropout: 0.139
 
   # Cross-modal attention settings
   cross_modal_dim: 512
-  attention_dropout: 0.090  # Tuned: 0.090071 (from Nov 2024 tuning, val_f1=0.2834)
+  attention_dropout: 0.090
   num_attention_heads: 8
 
   # DETR-specific settings
   d_model: 512
   num_encoder_layers: 6
   num_decoder_layers: 6
-  num_boundary_queries: 9  # Max 9 boundaries in 18-frame window
-  detr_dropout: 0.298  # Tuned: 0.297792 (from Nov 2024 tuning, val_f1=0.2834)
+  num_boundary_queries: 9
+  detr_dropout: 0.298
   detr_feedforward_dim: 2048
 
   # Legacy settings (for TinyFASTEncoder)
@@ -82,7 +82,7 @@ data:
   num_dino_frames: 9
 
   # DataLoader (optimized batch size with gradient accumulation)
-  batch_size: 1024  # Tuned: 1024 (from Nov 2024 tuning, val_f1=0.2834)
+  batch_size: 1024
   num_workers: 16
   pin_memory: true
 
@@ -99,33 +99,33 @@ data:
 training:
   num_epochs: 2000  # DETR typically needs more epochs
 
-  # Learning rate (tuned via hyperparameter search)
-  learning_rate: 0.000415  # Tuned: 0.000414934 (from Nov 2024 tuning, val_f1=0.2834)
-  weight_decay: 0.000497  # Tuned: 0.000497306 (from Nov 2024 tuning, val_f1=0.2834)
-  optimizer: adamw  # AdamW recommended for transformers
+  # Learning rate
+  learning_rate: 0.000415
+  weight_decay: 0.000497
+  optimizer: adamw
 
-  # Warmup (tuned - shorter warmup performs better)
-  warmup_steps: 1000  # Tuned: 1000 (from Nov 2024 tuning, val_f1=0.2834)
-  warmup_start_lr: 0.0000001  # 1e-7
+  # Warmup
+  warmup_steps: 1000
+  warmup_start_lr: 0.0000001
 
   # Scheduler
   scheduler: cosine
   min_lr: 0.000001  # 1e-6
 
-  # DETR Loss settings (tuned via hyperparameter search)
-  loss_type: "set_criterion"  # Use Hungarian matching loss
-  loss_position_weight: 5.12  # Tuned: 5.118784 (from Nov 2024 tuning, val_f1=0.2834)
-  loss_confidence_weight: 2.06  # Tuned: 2.063161 (from Nov 2024 tuning, val_f1=0.2834)
-  loss_eos_coef: 0.093  # Tuned: 0.092811 (from Nov 2024 tuning, val_f1=0.2834, lower = more upweighting)
+  # DETR Loss settings
+  loss_type: "set_criterion"
+  loss_position_weight: 5.12
+  loss_confidence_weight: 2.06
+  loss_eos_coef: 0.093
 
   # Optional: Use focal loss for confidence (helps with class imbalance)
   use_focal_loss: false
   loss_focal_alpha: 0.25  # Only used if use_focal_loss=true
   loss_focal_gamma: 2.0
 
-  # Hungarian matcher costs (tuned via hyperparameter search)
-  matcher_cost_position: 9.45  # Tuned: 9.446225 (from Nov 2024 tuning, val_f1=0.2834)
-  matcher_cost_confidence: 2.70  # Tuned: 2.699667 (from Nov 2024 tuning, val_f1=0.2834)
+  # Hungarian matcher costs
+  matcher_cost_position: 9.45
+  matcher_cost_confidence: 2.70
 
   # Metrics (for evaluation)
   confidence_threshold: 0.5  # Threshold for filtering predictions
@@ -134,14 +134,14 @@ training:
   # mAP computation settings
   confidence_thresholds_for_map: [0.3, 0.4, 0.5]
 
-  # Regularization (tuned via hyperparameter search)
-  gradient_clip_val: 0.230  # Tuned: 0.230197 (from Nov 2024 tuning, val_f1=0.2834)
-  gradient_clip_type: "norm"  # Clip by global norm
-  gradient_accumulation_steps: 4  # Accumulate gradients over 4 steps (effective batch size = 1024 * 4 = 4096)
-  use_amp: true  # Mixed precision for efficiency
+  # Regularization
+  gradient_clip_val: 0.230
+  gradient_clip_type: "norm"
+  gradient_accumulation_steps: 4
+  use_amp: true
 
   # Checkpointing
-  checkpoint_dir: ./checkpoints/multi_task_327_352_356_detr
+  checkpoint_dir: ./checkpoints/multi_task_detr
   save_every: 10
   save_best_only: true
   monitor_metric: "val/f1"  # Monitor F1 score
@@ -162,8 +162,8 @@ training:
 wandb:
   enabled: true
   project: task-segmentation
-  name: multi_task_327_352_356_detr
-  tags: [multi_task, detr, set_based, hungarian_matching, learned_queries]
-  notes: "DETR-style boundary detection with learned queries and set-based supervision"
+  name: multi_task_detr
+  tags: [multi_task, detr, tuned]
+  notes: "Multi-task DETR with tuned hyperparameters"
   mode: online
   log_model: true

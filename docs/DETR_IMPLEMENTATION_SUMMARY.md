@@ -471,4 +471,3 @@ Next critical step: **Update data pipeline for set-based targets**
 - Run `python tests/test_boundary_detr.py` to verify installation
 - Check training logs for convergence issues
 
-**Contact**: Claude Code (Implementation Date: 2025-11-05)

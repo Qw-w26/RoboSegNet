@@ -20,7 +20,7 @@ Example usage:
     # Debug mode
     python scripts/train.py --config configs/experiments/debug.yaml
 
-Author: Claude Code
+
 Date: October 25, 2025
 """
 
@@ -56,7 +56,6 @@ from training import (
     CheckpointCallback,
     EarlyStoppingCallback,
     LearningRateSchedulerCallback,
-    EmbeddingVisualizationCallback,
 )
 from training.detr_utils import collate_detr_batch, compute_detr_metrics
 from data import load_parquet_split

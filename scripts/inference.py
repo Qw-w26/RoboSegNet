@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Inference script for boundary prediction models.
 
+DEPRECATED: This script uses legacy data loading (data.splits).
+For multi-task inference, use evaluate_ablation.py or update this script.
+
 This script provides production inference with:
 - Loading trained model from checkpoint
 - Processing single trajectory or batch of trajectories
@@ -31,7 +34,7 @@ Example usage:
         --threshold 0.7 \
         --output results.json
 
-Author: Claude Code
+
 Date: October 24, 2025
 """
 

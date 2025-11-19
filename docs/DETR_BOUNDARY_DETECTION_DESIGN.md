@@ -1,6 +1,6 @@
 # DETR-Style Boundary Detection: Technical Design Document
 
-**Author**: Claude Code
+
 **Date**: 2025-11-05
 **Version**: 1.0
 

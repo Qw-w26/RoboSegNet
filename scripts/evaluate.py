@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Evaluation script for boundary prediction models.
 
+DEPRECATED: This script uses legacy data loading (data.splits).
+For multi-task evaluation, use scripts/evaluate_ablation.py instead.
+
 This script provides comprehensive evaluation with:
 - Loading trained model from checkpoint
 - Computing all metrics (F1@IoU, classification, temporal, confidence)
@@ -26,7 +29,7 @@ Example usage:
         --test-split ./splits/task_327_test.json \
         --save-predictions
 
-Author: Claude Code
+
 Date: October 24, 2025
 """
 

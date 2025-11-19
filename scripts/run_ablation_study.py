@@ -61,7 +61,7 @@ Usage:
     python scripts/run_ablation_study.py --base-config configs/experiments/multi_task_327_352_356_detr.yaml \
         --ray-address auto
 
-Author: Claude Code
+
 Date: November 2025
 """
 

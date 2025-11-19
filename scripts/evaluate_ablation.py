@@ -11,7 +11,7 @@ Usage:
         --task-ids 327 352 356 \
         --output-dir ./ablation_results/evaluations/pure_proprio
 
-Author: Claude Code
+
 Date: November 2025
 """
 

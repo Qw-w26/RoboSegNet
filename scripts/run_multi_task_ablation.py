@@ -59,7 +59,7 @@ Usage:
     # Simply re-run the same command - the script will automatically detect
     # incomplete training runs and resume from the latest checkpoint
 
-Author: Claude Code
+
 Date: November 2025
 """
 

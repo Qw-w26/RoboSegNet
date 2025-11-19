@@ -45,7 +45,7 @@ Workflow:
    d. Delete raw downloaded data and TARs (if cleanup enabled)
 4. Merge all processed data into final datasets
 
-Author: Claude Code
+
 Date: October 30, 2025
 """
 

@@ -1,6 +1,5 @@
 """Training module for segment boundary prediction."""
 
-from .dataset_generator import SegmentBoundaryDataset, create_dataloaders
 from .training_dataset import (
     BoundaryDataset,
     TrainingDatasetConfig,
@@ -16,11 +15,7 @@ from .callbacks import (
     EarlyStoppingCallback,
     TensorBoardCallback,
     LearningRateSchedulerCallback,
-    EmbeddingVisualizationCallback
 )
-# Legacy config moved to config/config_schema.py
-# Import from there instead:
-# from config import TrainingConfig, WandBConfig, DataConfig
 from .label_smoothing import (
     LabelSmoother,
     GaussianSmoother,
@@ -33,10 +28,8 @@ from .label_smoothing import (
 
 __all__ = [
     # Dataset
-    'SegmentBoundaryDataset',
-    'create_dataloaders',
     'BoundaryDataset',
-    'LazyBoundaryDataset',  # Faster for large datasets
+    'LazyBoundaryDataset',
     'TrainingDatasetConfig',
     'Window',
     'collate_dict',
@@ -52,10 +45,6 @@ __all__ = [
     'EarlyStoppingCallback',
     'TensorBoardCallback',
     'LearningRateSchedulerCallback',
-    'EmbeddingVisualizationCallback',
-
-    # Configuration (moved to config/ module)
-    # Use: from config import TrainingConfig, WandBConfig, DataConfig
 
     # Label smoothing
     'LabelSmoother',
