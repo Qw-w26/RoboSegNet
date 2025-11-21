@@ -16,6 +16,12 @@ from .multi_task_loader import (
     get_multi_task_statistics,
 )
 
+# Legacy data loading (used by prepare_data.py)
+from .base_dataset import TrajectoryData
+from .agibot_dataset import AgiBotWorldDataset
+from .dataset_builder import DatasetBuilder
+from .splits import DatasetSplitter, SplitConfig, SplitManifest
+
 __all__ = [
     # Parquet loading
     'Segment',
@@ -28,4 +34,12 @@ __all__ = [
     # Multi-task loading
     'load_multi_task_split',
     'get_multi_task_statistics',
+
+    # Legacy loading
+    'TrajectoryData',
+    'AgiBotWorldDataset',
+    'DatasetBuilder',
+    'DatasetSplitter',
+    'SplitConfig',
+    'SplitManifest',
 ]
