@@ -20,7 +20,7 @@ class UploadConfig:
     upload_folder: str
     """Directory where processed dataset (tars and files) will be stored before upload"""
     
-    repo_id: str = "apgoldberg/RoboSegData"
+    repo_id: str
     """HuggingFace repository ID"""
     
     repo_type: str = "dataset"
