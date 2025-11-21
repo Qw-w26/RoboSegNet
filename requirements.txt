@@ -35,3 +35,4 @@ tqdm>=4.65.0
 # Utilities
 huggingface-hub>=0.16.0
 datasets>=2.14.0
+tyro>=0.9.35
