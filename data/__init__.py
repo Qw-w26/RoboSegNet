@@ -21,6 +21,7 @@ from .base_dataset import TrajectoryData
 from .agibot_dataset import AgiBotWorldDataset
 from .dataset_builder import DatasetBuilder
 from .splits import DatasetSplitter, SplitConfig, SplitManifest
+from .ray_processor import TrajectoryProcessor
 
 __all__ = [
     # Parquet loading
@@ -42,4 +43,5 @@ __all__ = [
     'DatasetSplitter',
     'SplitConfig',
     'SplitManifest',
+    'TrajectoryProcessor',
 ]
